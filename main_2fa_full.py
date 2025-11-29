@@ -1,79 +1,181 @@
-
-import json
 import os
+import json
 import requests
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
-import pyotp
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
-app = FastAPI()
-
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+# ==============================
+# CONFIG — thay bằng token của bạn
+# ==============================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 GIST_ID = os.getenv("GIST_ID")
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"}
+GIST_TOKEN = os.getenv("GIST_TOKEN")
 
+GIST_URL = f"https://api.github.com/gists/{GIST_ID}"
 
-def load_secrets():
-    url = f"https://api.github.com/gists/{GIST_ID}"
-    r = requests.get(url, headers=HEADERS)
-    files = r.json().get("files", {})
-    content = files.get("secrets.json", {}).get("content", "{}")
-    return json.loads(content)
-
-
-def save_secrets(secrets):
-    url = f"https://api.github.com/gists/{GIST_ID}"
-    data = {
-        "files": {
-            "secrets.json": {
-                "content": json.dumps(secrets, indent=4)
-            }
+# ==============================
+# Hàm lưu user vào Gist
+# ==============================
+def save_user_to_gist(user_id):
+    try:
+        headers = {
+            "Authorization": f"token {GIST_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
         }
-    }
-    requests.patch(url, headers=HEADERS, json=data)
+
+        # Lấy nội dung cũ
+        gist = requests.get(GIST_URL, headers=headers).json()
+        current_data = json.loads(gist["files"]["users.json"]["content"])
+
+        # Nếu user chưa có → thêm vào
+        if str(user_id) not in current_data:
+            current_data[str(user_id)] = {"joined": True}
+
+            new_file_content = {
+                "files": {
+                    "users.json": {
+                        "content": json.dumps(current_data, indent=4)
+                    }
+                }
+            }
+
+            requests.patch(GIST_URL, headers=headers, json=new_file_content)
+
+    except Exception as e:
+        print("Lỗi Gist:", e)
+
+# ==============================
+# Menu chính
+# ==============================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    save_user_to_gist(user_id)
+
+    keyboard = [
+        [InlineKeyboardButton("🛒 Mua gói", callback_data="buy")],
+        [InlineKeyboardButton("🎁 Gói miễn phí", callback_data="free")],
+    ]
+
+    text = (
+        "🎉 **Chào mừng bạn đến với Bot Mẫu!**\n\n"
+        "Bot cung cấp menu demo cho mục đích học tập và nghiên cứu.\n"
+        "Bạn có thể:\n"
+        "- Xem các gói (GO / PLUS / TEAM)\n"
+        "- Nhận gói miễn phí thử nghiệm\n"
+    )
+
+    await update.message.reply_markdown(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ==============================
+# Menu mua gói
+# ==============================
+async def buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("GO", callback_data="buy_go")],
+        [InlineKeyboardButton("PLUS", callback_data="buy_plus")],
+        [InlineKeyboardButton("TEAM", callback_data="buy_team")],
+        [InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")],
+    ]
+
+    await update.callback_query.message.edit_text(
+        "🛒 **Chọn gói bạn muốn mua:**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+# ==============================
+# Nội dung từng gói
+# ==============================
+async def show_price(update: Update, title, price_main, price_shared):
+    text = (
+        f"📦 **{title}**\n\n"
+        f"💰 Giá chính: `{price_main}`\n"
+        f"💳 Giá chia sẻ: `{price_shared}`\n\n"
+        "⚠️ Đây là dữ liệu demo."
+    )
+
+    await update.callback_query.message.edit_text(text, parse_mode="Markdown")
+
+# ==============================
+# Menu miễn phí
+# ==============================
+async def free_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Miễn phí GO", callback_data="free_go")],
+        [InlineKeyboardButton("Miễn phí EDU", callback_data="free_edu")],
+        [InlineKeyboardButton("Miễn phí PLUS", callback_data="free_plus")],
+        [InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")],
+    ]
+
+    await update.callback_query.message.edit_text(
+        "🎁 **Chọn gói miễn phí muốn nhận:**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+# ==============================
+# Sản phẩm demo miễn phí
+# ==============================
+async def free_item(update: Update, name):
+    await update.callback_query.message.edit_text(
+        f"🎉 Bạn đã nhận **{name}**!\n"
+        "Đây chỉ là dữ liệu demo để bạn test bot.\n\n"
+        f"`DEMO-{name}-123456`",
+        parse_mode="Markdown",
+    )
+
+# ==============================
+# Xử lý Callback
+# ==============================
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+
+    if data == "buy":
+        return await buy_menu(update, context)
+
+    if data == "free":
+        return await free_menu(update, context)
+
+    if data == "back_main":
+        return await start(update, context)
+
+    if data == "buy_go":
+        return await show_price(update, "Gói GO", "100.000đ", "50.000đ")
+
+    if data == "buy_plus":
+        return await show_price(update, "Gói PLUS", "200.000đ", "100.000đ")
+
+    if data == "buy_team":
+        return await show_price(update, "Gói TEAM", "500.000đ", "250.000đ")
+
+    if data == "free_go":
+        return await free_item(update, "GO")
+
+    if data == "free_edu":
+        return await free_item(update, "EDU")
+
+    if data == "free_plus":
+        return await free_item(update, "PLUS")
 
 
-@app.post("/webhook")
-async def handle_message(request: Request):
-    body = await request.json()
-    message = body.get("message", {}).get("text", "")
-    chat_id = body.get("message", {}).get("chat", {}).get("id", "")
-    secrets = load_secrets()
+# ==============================
+# Chạy bot
+# ==============================
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    reply = "Xin chào"
-    command, *args = message.strip().split()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callbacks))
 
-    if command.lower() == "add" and len(args) == 2:
-        email, secret = args
-        secrets[email] = secret
-        save_secrets(secrets)
-        reply = "✅ Thêm thành công"
-    elif command.lower() == "edit" and len(args) == 2:
-        email, secret = args
-        if email in secrets:
-            secrets[email] = secret
-            save_secrets(secrets)
-            reply = "✅ Sửa thành công"
-        else:
-            reply = "❌ Không tồn tại email"
-    elif command.lower() == "delete" and len(args) == 1:
-        email = args[0]
-        if email in secrets:
-            del secrets[email]
-            save_secrets(secrets)
-            reply = "✅ Xoá thành công"
-        else:
-            reply = "❌ Không tồn tại email"
-    elif "@" in message:
-        email = message.strip()
-        if email in secrets:
-            totp = pyotp.TOTP(secrets[email])
-            reply = f"⏱ Mã 2FA: {totp.now()}"
-        else:
-            reply = "❌ Không tìm thấy secret cho email này"
+    app.run_polling()
 
-    token = os.getenv("BOT_TOKEN")
-    telegram_url = f"https://api.telegram.org/bot{token}/sendMessage"
-    requests.post(telegram_url, json={"chat_id": chat_id, "text": reply})
 
-    return PlainTextResponse("OK")
+if __name__ == "__main__":
+    main()
