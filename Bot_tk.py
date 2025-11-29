@@ -286,15 +286,41 @@ async def receive_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==============================
 # RUN BOT
 # ==============================
-def main():
+from aiohttp import web
+
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"https://{os.getenv('CLOUD_RUN_SERVICE_URL')}{WEBHOOK_PATH}"
+
+async def webhook_handler(request):
+    body = await request.json()
+    await app.update_queue.put(Update.de_json(body, app.bot))
+    return web.Response()
+
+async def main():
+    global app
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_user_info))
 
-    app.run_polling()
+    # Set webhook
+    await app.bot.set_webhook(WEBHOOK_URL)
 
+    # Start aiohttp server
+    web_app = web.Application()
+    web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+
+    await site.start()
+
+    print(f"Bot is running via webhook → {WEBHOOK_URL}")
+
+import asyncio
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
