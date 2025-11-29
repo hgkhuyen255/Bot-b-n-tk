@@ -2,6 +2,3 @@ fastapi
 uvicorn
 pyotp
 requests
-python-telegram-bot==20.7
-aiohttp
-requests
