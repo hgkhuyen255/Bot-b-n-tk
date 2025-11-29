@@ -33,14 +33,33 @@ TG_BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BANK_ID = "970436"                     # MB Bank (ví dụ)
 ACCOUNT_NUMBER = "0711000283429"       # 🔥 THAY THÀNH SỐ TK CỦA BẠN
 
-AMOUNTS = {
-    "GO": 50000,
-    "PLUS": 100000,
-    "TEAM": 200000,
+# GIÁ THEO GÓI + LOẠI TÀI KHOẢN
+# 👉 SỬA GIÁ TẠI ĐÂY CHO ĐÚNG
+PACKAGE_PRICES = {
+    "GO": {
+        "shop": 50000,    # TK shop cấp
+        "own":  70000,    # TK chính chủ
+    },
+    "PLUS": {
+        "shop": 100000,
+        "own":  130000,
+    },
+    "TEAM": {
+        "shop": 200000,
+        "own":  260000,
+    },
+    "EDU": {
+        "shop": 80000,    # EDU chỉ có shop cấp
+    },
 }
 
-# Lưu trạng thái user (đợi info gói nào)
-USER_STATE = {}  # {user_id: {"awaiting_info": "GO" | "PLUS" | "TEAM"}}
+# Tên file trong Gist (bạn tạo sẵn)
+FREE_ACCOUNTS_FILE = "free_accounts.json"   # tk miễn phí
+SHOP_ACCOUNTS_FILE = "shop_accounts.json"   # tk bán (shop cấp)
+
+# Lưu trạng thái user
+# {user_id: {"awaiting_info": "GO|PLUS|TEAM|EDU", "account_type": "shop|own"}}
+USER_STATE = {}
 
 
 # ==============================
@@ -87,21 +106,50 @@ def save_order_to_gist(user_id: int, data: dict) -> None:
     save_gist_json("orders.json", orders)
 
 
+def get_and_consume_account(filename: str, package: str) -> str | None:
+    """
+    Lấy 1 tài khoản từ file (free / shop) theo gói,
+    đồng thời xóa tài khoản đó khỏi list để không cấp lại lần sau.
+    Cấu trúc file Gist ví dụ:
+
+    {
+        "GO": [
+            "user1|pass1",
+            "user2|pass2"
+        ],
+        "PLUS": [
+            "user3|pass3"
+        ]
+    }
+    """
+    data = load_gist_json(filename)
+    accounts = data.get(package, [])
+    if isinstance(accounts, list) and accounts:
+        acc = accounts.pop(0)  # lấy 1 tk, đồng thời remove
+        data[package] = accounts
+        save_gist_json(filename, data)
+        return acc
+    return None
+
+
 # ==============================
 #  QR HELPER
 # ==============================
-def generate_qr(package_name: str, user_id: int, username: str | None):
-    # nếu không có username thì dùng id
+def generate_qr(package_name: str, account_type: str, user_id: int, username: str | None):
+    """
+    QR theo gói + loại tài khoản.
+    addInfo = GO-shop-username
+    """
     username_slug = username or f"id{user_id}"
 
-    addinfo = f"{package_name}-{username_slug}"
-    amount = AMOUNTS[package_name]
+    price = PACKAGE_PRICES[package_name][account_type]
+    addinfo = f"{package_name}-{account_type}-{username_slug}"
 
     qr_url = (
         f"https://img.vietqr.io/image/{BANK_ID}-{ACCOUNT_NUMBER}-compact.png"
-        f"?amount={amount}&addInfo={addinfo}"
+        f"?amount={price}&addInfo={addinfo}"
     )
-    return qr_url, amount
+    return qr_url, price
 
 
 # ==============================
@@ -180,14 +228,44 @@ def main_menu_keyboard():
 
 
 def buy_menu_keyboard():
+    # Thêm EDU vào menu mua gói
     return {
         "inline_keyboard": [
             [{"text": "MAIN GO", "callback_data": "buy_go_main"}],
             [{"text": "MAIN PLUS", "callback_data": "buy_plus_main"}],
             [{"text": "MAIN TEAM", "callback_data": "buy_team_main"}],
+            [{"text": "MAIN EDU", "callback_data": "buy_edu_main"}],
             [{"text": "⬅️ Quay lại", "callback_data": "back_main"}],
         ]
     }
+
+
+def buy_type_keyboard(package: str):
+    """
+    Menu chọn loại tài khoản (shop cấp / chính chủ) + kèm giá.
+    EDU chỉ có shop cấp.
+    """
+    prices = PACKAGE_PRICES.get(package, {})
+    rows = []
+
+    if "shop" in prices:
+        rows.append([
+            {
+                "text": f"TK shop cấp - {prices['shop']:,}đ",
+                "callback_data": f"buy_{package.lower()}_shop",
+            }
+        ])
+    if "own" in prices:
+        rows.append([
+            {
+                "text": f"TK chính chủ - {prices['own']:,}đ",
+                "callback_data": f"buy_{package.lower()}_own",
+            }
+        ])
+
+    rows.append([{"text": "⬅️ Quay lại chọn gói", "callback_data": "back_buy"}])
+
+    return {"inline_keyboard": rows}
 
 
 def free_menu_keyboard():
@@ -205,7 +283,7 @@ def send_main_menu(chat_id):
     text = (
         "🎉 *Chào mừng bạn đến với Bot!*\n\n"
         "Bạn có thể:\n"
-        "- Mua gói (GO / PLUS / TEAM)\n"
+        "- Mua gói (GO / PLUS / TEAM / EDU)\n"
         "- Nhận gói miễn phí\n"
         "_Bot mẫu phục vụ học tập._"
     )
@@ -213,7 +291,13 @@ def send_main_menu(chat_id):
 
 
 def send_buy_menu(chat_id, message_id=None):
-    text = "🛒 *Chọn gói MAIN bạn muốn mua:*"
+    text = (
+        "🛒 *Chọn gói MAIN bạn muốn mua:*\n\n"
+        "Mỗi gói sẽ có 2 lựa chọn:\n"
+        "- Tài khoản shop cấp\n"
+        "- Tài khoản chính chủ (nếu có)\n\n"
+        "Bấm vào gói để xem chi tiết giá."
+    )
     if message_id:
         tg_edit_message_text(chat_id, message_id, text,
                              reply_markup=buy_menu_keyboard(), parse_mode="Markdown")
@@ -221,8 +305,31 @@ def send_buy_menu(chat_id, message_id=None):
         tg_send_message(chat_id, text, reply_markup=buy_menu_keyboard(), parse_mode="Markdown")
 
 
+def send_buy_type_menu(chat_id, package: str, message_id=None):
+    prices = PACKAGE_PRICES.get(package, {})
+    desc_lines = [f"📦 *GÓI {package}*"]
+
+    if "shop" in prices:
+        desc_lines.append(f"- TK shop cấp: `{prices['shop']:,}đ`")
+    if "own" in prices:
+        desc_lines.append(f"- TK chính chủ: `{prices['own']:,}đ`")
+
+    text = "\n".join(desc_lines)
+
+    if message_id:
+        tg_edit_message_text(chat_id, message_id, text,
+                             reply_markup=buy_type_keyboard(package), parse_mode="Markdown")
+    else:
+        tg_send_message(chat_id, text,
+                        reply_markup=buy_type_keyboard(package), parse_mode="Markdown")
+
+
 def send_free_menu(chat_id, message_id=None):
-    text = "🎁 *Chọn gói miễn phí:*"
+    text = (
+        "🎁 *Chọn gói miễn phí:*\n\n"
+        "Tài khoản miễn phí được cấp tự động từ kho riêng,\n"
+        "không ảnh hưởng đến tài khoản shop bán."
+    )
     if message_id:
         tg_edit_message_text(chat_id, message_id, text,
                              reply_markup=free_menu_keyboard(), parse_mode="Markdown")
@@ -230,43 +337,57 @@ def send_free_menu(chat_id, message_id=None):
         tg_send_message(chat_id, text, reply_markup=free_menu_keyboard(), parse_mode="Markdown")
 
 
-def send_free_item(chat_id, item_name, message_id=None):
-    text = (
-        f"🎉 Bạn đã nhận *{item_name}*!\n"
-        "Đây là dữ liệu demo.\n\n"
-        f"`DEMO-{item_name}-123456`"
-    )
+def send_free_item_from_gist(chat_id, package: str, message_id=None):
+    """
+    Lấy tài khoản miễn phí từ Gist và gửi cho khách.
+    """
+    account = get_and_consume_account(FREE_ACCOUNTS_FILE, package)
+    if account:
+        text = (
+            f"🎉 Đây là tài khoản *miễn phí {package}* của bạn:\n\n"
+            f"`{account}`\n\n"
+            "Chúc bạn trải nghiệm vui vẻ!"
+        )
+    else:
+        text = (
+            f"❌ Hiện không còn tài khoản miễn phí {package}.\n"
+            "Vui lòng thử lại sau hoặc chọn gói khác."
+        )
+
     if message_id:
         tg_edit_message_text(chat_id, message_id, text, parse_mode="Markdown")
     else:
         tg_send_message(chat_id, text, parse_mode="Markdown")
 
 
-def show_main_package(chat_id, user_id, username, package, message_id=None):
-    """Gửi thông tin gói + QR, set trạng thái đợi user gửi email/ghi chú"""
-    qr_url, amount = generate_qr(package, user_id, username)
+def show_main_package(chat_id, user_id, username, package, account_type, message_id=None):
+    """
+    Gửi thông tin gói + QR, set trạng thái đợi user gửi email/ghi chú.
+    account_type: 'shop' hoặc 'own'
+    """
+    qr_url, amount = generate_qr(package, account_type, user_id, username)
+
+    type_text = "tài khoản shop cấp" if account_type == "shop" else "tài khoản chính chủ"
 
     text = (
-        f"📦 *GÓI MAIN {package}*\n\n"
-        "Để kích hoạt gói, vui lòng gửi:\n"
+        f"📦 *GÓI MAIN {package} - {type_text}*\n\n"
+        "Để kích hoạt gói, vui lòng gửi cho bot:\n"
         "1. Email tài khoản\n"
         "2. Ghi chú (nếu có)\n\n"
         f"💳 Số tiền cần thanh toán: `{amount:,}đ`\n"
         "📌 *Quét mã QR bên dưới để thanh toán.*\n\n"
-        "⏳ Vui lòng đợi admin kiểm tra giao dịch."
+        "⏳ Sau khi thanh toán, admin sẽ kiểm tra và hoàn tất xử lý."
     )
 
-    # gửi text
     if message_id:
         tg_edit_message_text(chat_id, message_id, text, parse_mode="Markdown")
     else:
         tg_send_message(chat_id, text, parse_mode="Markdown")
 
-    # gửi ảnh QR
     tg_send_photo(chat_id, qr_url)
 
-    # lưu trạng thái
-    USER_STATE[user_id] = {"awaiting_info": package}
+    # lưu trạng thái (gói + loại tk)
+    USER_STATE[user_id] = {"awaiting_info": package, "account_type": account_type}
 
 
 # ==============================
@@ -317,22 +438,48 @@ async def telegram_webhook(request: Request):
             send_free_menu(chat_id, message_id)
         elif data == "back_main":
             send_main_menu(chat_id)
+        elif data == "back_buy":
+            send_buy_menu(chat_id, message_id)
 
-        # GÓI MAIN
+        # CHỌN GÓI
         elif data == "buy_go_main":
-            show_main_package(chat_id, user_id, username, "GO", message_id)
+            send_buy_type_menu(chat_id, "GO", message_id)
         elif data == "buy_plus_main":
-            show_main_package(chat_id, user_id, username, "PLUS", message_id)
+            send_buy_type_menu(chat_id, "PLUS", message_id)
         elif data == "buy_team_main":
-            show_main_package(chat_id, user_id, username, "TEAM", message_id)
+            send_buy_type_menu(chat_id, "TEAM", message_id)
+        elif data == "buy_edu_main":
+            send_buy_type_menu(chat_id, "EDU", message_id)
 
-        # FREE ITEMS
+        # CHỌN LOẠI TÀI KHOẢN (GO)
+        elif data == "buy_go_shop":
+            show_main_package(chat_id, user_id, username, "GO", "shop", message_id)
+        elif data == "buy_go_own":
+            show_main_package(chat_id, user_id, username, "GO", "own", message_id)
+
+        # PLUS
+        elif data == "buy_plus_shop":
+            show_main_package(chat_id, user_id, username, "PLUS", "shop", message_id)
+        elif data == "buy_plus_own":
+            show_main_package(chat_id, user_id, username, "PLUS", "own", message_id)
+
+        # TEAM
+        elif data == "buy_team_shop":
+            show_main_package(chat_id, user_id, username, "TEAM", "shop", message_id)
+        elif data == "buy_team_own":
+            show_main_package(chat_id, user_id, username, "TEAM", "own", message_id)
+
+        # EDU (chỉ shop)
+        elif data == "buy_edu_shop":
+            show_main_package(chat_id, user_id, username, "EDU", "shop", message_id)
+
+        # FREE ITEMS (lấy từ Gist)
         elif data == "free_go":
-            send_free_item(chat_id, "GO", message_id)
+            send_free_item_from_gist(chat_id, "GO", message_id)
         elif data == "free_edu":
-            send_free_item(chat_id, "EDU", message_id)
+            send_free_item_from_gist(chat_id, "EDU", message_id)
         elif data == "free_plus":
-            send_free_item(chat_id, "PLUS", message_id)
+            send_free_item_from_gist(chat_id, "PLUS", message_id)
 
         return PlainTextResponse("OK")
 
@@ -360,15 +507,25 @@ async def telegram_webhook(request: Request):
     # Nếu user đang ở trạng thái "awaiting_info" -> xử lý như receive_user_info
     state = USER_STATE.get(user_id) or {}
     package = state.get("awaiting_info")
+    account_type = state.get("account_type")
+
     if package:
         info = text
 
+        # Nếu là tk shop cấp -> lấy tk từ Gist
+        shop_account = None
+        if account_type == "shop":
+            shop_account = get_and_consume_account(SHOP_ACCOUNTS_FILE, package)
+
+        # lưu order
         save_order_to_gist(
             user_id,
             {
                 "username": username,
                 "package": package,
+                "account_type": account_type,
                 "info": info,
+                "account_given": shop_account,
             },
         )
 
@@ -377,22 +534,41 @@ async def telegram_webhook(request: Request):
             admin_msg = (
                 f"🔥 *ĐƠN HÀNG MỚI*\n\n"
                 f"👤 User: @{username} (ID: {user_id})\n"
-                f"📦 Gói: {package}\n"
-                f"📩 Thông tin:\n{info}"
+                f"📦 Gói: {package} ({account_type})\n"
+                f"📩 Thông tin:\n{info}\n\n"
             )
+            if shop_account:
+                admin_msg += f"🔐 TK shop cấp: `{shop_account}`"
             tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
 
         # Báo khách
-        tg_send_message(
-            chat_id,
-            "✅ Thông tin đã được ghi nhận.\nAdmin sẽ hỗ trợ bạn sớm!",
-        )
+        if account_type == "shop":
+            if shop_account:
+                user_msg = (
+                    "✅ Đã nhận thông tin & thanh toán của bạn.\n"
+                    "Đây là tài khoản shop cấp:\n\n"
+                    f"`{shop_account}`\n\n"
+                    "Nếu cần hỗ trợ, hãy liên hệ admin."
+                )
+            else:
+                user_msg = (
+                    "✅ Đã nhận thông tin của bạn.\n"
+                    "Hiện tại kho tài khoản shop đang được cập nhật.\n"
+                    "Admin sẽ cấp tài khoản cho bạn sớm nhất!"
+                )
+        else:  # chính chủ
+            user_msg = (
+                "✅ Đã nhận thông tin & thanh toán của bạn.\n"
+                "Admin sẽ thiết lập / nâng cấp gói cho tài khoản chính chủ của bạn."
+            )
+
+        tg_send_message(chat_id, user_msg, parse_mode="Markdown")
 
         # reset state
-        USER_STATE[user_id]["awaiting_info"] = None
+        USER_STATE[user_id] = {"awaiting_info": None, "account_type": None}
         return PlainTextResponse("OK")
 
-    # Nếu không ở trạng thái mua gói, có thể trả lời hướng dẫn chung
+    # Nếu không ở trạng thái mua gói, trả lời hướng dẫn chung
     tg_send_message(
         chat_id,
         "ℹ️ Vui lòng dùng /start để mở menu và chọn gói.",
