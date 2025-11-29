@@ -111,8 +111,8 @@ def get_and_consume_account(filename: str, package: str) -> str | None:
     """
     Lấy 1 tài khoản từ file (free / shop) theo gói,
     đồng thời xóa tài khoản đó khỏi list để không cấp lại lần sau.
-    Cấu trúc file Gist ví dụ:
 
+    Cấu trúc file Gist ví dụ:
     {
         "GO": [
             "user1|pass1",
@@ -198,7 +198,7 @@ def tg_send_message(chat_id, text, reply_markup=None, parse_mode=None):
         print("sendMessage error:", e)
 
 
-def tg_send_photo(chat_id, photo_url, caption=None, parse_mode=None):
+def tg_send_photo(chat_id, photo_url, caption=None, parse_mode=None, reply_markup=None):
     url = f"{TG_BASE_URL}/sendPhoto"
     payload = {
         "chat_id": chat_id,
@@ -208,6 +208,8 @@ def tg_send_photo(chat_id, photo_url, caption=None, parse_mode=None):
         payload["caption"] = caption
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     try:
         requests.post(url, json=payload)
@@ -318,6 +320,15 @@ def free_menu_keyboard():
     }
 
 
+def payment_confirm_keyboard():
+    # Nút bên dưới QR: "Tôi đã chuyển khoản"
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Tôi đã chuyển khoản", "callback_data": "confirm_paid"}],
+        ]
+    }
+
+
 def send_main_menu(chat_id):
     text = (
         "🎉 *Chào mừng bạn đến với Bot!*\n\n"
@@ -408,22 +419,25 @@ def show_main_package(chat_id, user_id, username, package, account_type, message
 
     type_text = "tài khoản shop cấp" if account_type == "shop" else "tài khoản chính chủ"
 
-    text = (
+    caption = (
         f"📦 *GÓI MAIN {package} - {type_text}*\n\n"
         "Để kích hoạt gói, vui lòng:\n"
-        "1️⃣ Quét mã QR bên dưới để thanh toán.\n"
-        "2️⃣ Gửi cho bot *email tài khoản + ghi chú* (nếu có).\n\n"
+        "1️⃣ Quét mã QR này để thanh toán.\n"
+        "2️⃣ Sau khi chuyển khoản, bấm nút *“Tôi đã chuyển khoản”* bên dưới.\n"
+        "3️⃣ Gửi cho bot *email tài khoản + ghi chú* (nếu có).\n\n"
         f"💳 Số tiền cần thanh toán: `{amount}đ`\n"
         f"🧾 Nội dung chuyển khoản (addInfo): `{payment_code}`\n"
-        "⏳ Sau khi hệ thống xác nhận thanh toán, bot sẽ tự động cấp tài khoản / nâng cấp gói."
+        "⏳ Khi hệ thống xác nhận thanh toán, bot sẽ tự động cấp tài khoản / nâng cấp gói."
     )
 
-    if message_id:
-        tg_edit_message_text(chat_id, message_id, text, parse_mode="Markdown")
-    else:
-        tg_send_message(chat_id, text, parse_mode="Markdown")
-
-    tg_send_photo(chat_id, qr_url)
+    # Gửi ảnh QR + nút "Tôi đã chuyển khoản"
+    tg_send_photo(
+        chat_id,
+        qr_url,
+        caption=caption,
+        parse_mode="Markdown",
+        reply_markup=payment_confirm_keyboard(),
+    )
 
     # lưu trạng thái (gói + loại tk + payment_code)
     USER_STATE[user_id] = {
@@ -519,6 +533,44 @@ async def telegram_webhook(request: Request):
         elif data == "buy_edu_shop":
             show_main_package(chat_id, user_id, username, "EDU", "shop", message_id)
 
+        # NÚT "Tôi đã chuyển khoản"
+        elif data == "confirm_paid":
+            state = USER_STATE.get(user_id) or {}
+            package = state.get("awaiting_info")
+            account_type = state.get("account_type")
+            payment_code = state.get("payment_code")
+
+            if not (package and payment_code):
+                tg_send_message(
+                    chat_id,
+                    "❌ Không tìm thấy đơn cần xác nhận.\nVui lòng dùng /start để chọn gói lại.",
+                )
+                return PlainTextResponse("OK")
+
+            # Cập nhật trạng thái đơn trong pending_orders.json
+            orders = load_gist_json(PENDING_ORDERS_FILE)
+            if payment_code in orders:
+                orders[payment_code]["status"] = "user_confirmed"
+                save_gist_json(PENDING_ORDERS_FILE, orders)
+
+            # Báo admin
+            if ADMIN_CHAT_ID:
+                admin_msg = (
+                    "✅ *KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN*\n\n"
+                    f"👤 User: @{username} (ID: {user_id})\n"
+                    f"📦 Gói: {package} ({account_type})\n"
+                    f"💳 Mã thanh toán: `{payment_code}`\n\n"
+                    "⏳ Vui lòng kiểm tra giao dịch trên app ngân hàng / hệ thống thanh toán."
+                )
+                tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
+
+            # Báo khách
+            tg_send_message(
+                chat_id,
+                "✅ Cảm ơn bạn! Hệ thống sẽ kiểm tra thanh toán và cấp tài khoản sớm nhất.\n"
+                "Bạn có thể chờ tin nhắn tiếp theo từ bot.",
+            )
+
         # FREE ITEMS (lấy từ Gist)
         elif data == "free_go":
             send_free_item_from_gist(chat_id, "GO", message_id)
@@ -578,7 +630,7 @@ async def telegram_webhook(request: Request):
         tg_send_message(
             chat_id,
             "✅ Đã nhận thông tin của bạn.\n"
-            "Khi hệ thống xác nhận thanh toán, bot sẽ tự động xử lý và cấp tài khoản.",
+            "Sau khi thanh toán được xác nhận, bot sẽ tự động xử lý và cấp tài khoản.",
         )
 
         return PlainTextResponse("OK")
