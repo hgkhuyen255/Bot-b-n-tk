@@ -10,20 +10,51 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 
 # ==============================
-# CONFIG — thay bằng token của bạn
+# CONFIG — thay bằng thông tin của bạn
 # ==============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GIST_ID = os.getenv("GIST_ID")
 GIST_TOKEN = os.getenv("GIST_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")   # 🔥 THAY ID ADMIN
+
+# QR CONFIG
+BANK_ID = "970436"          # MB Bank (Ví dụ)
+ACCOUNT_NUMBER = "0711000283429"  # 🔥 THAY SỐ TK CỦA BẠN
+
+# GIÁ TỪNG GÓI
+AMOUNTS = {
+    "GO": 50000,
+    "PLUS": 100000,
+    "TEAM": 200000,
+}
 
 GIST_URL = f"https://api.github.com/gists/{GIST_ID}"
 
+
 # ==============================
-# Hàm lưu user vào Gist
+# HÀM TẠO QR ĐỘNG
+# ==============================
+def generate_qr(package_name, username, amount):
+    if not username:
+        username = f"id{username}"
+
+    addinfo = f"{package_name}-{username}"
+
+    qr_url = (
+        f"https://img.vietqr.io/image/{BANK_ID}-{ACCOUNT_NUMBER}-compact.png"
+        f"?amount={amount}&addInfo={addinfo}"
+    )
+    return qr_url
+
+
+# ==============================
+# LƯU USER
 # ==============================
 def save_user_to_gist(user_id):
     try:
@@ -32,11 +63,9 @@ def save_user_to_gist(user_id):
             "Accept": "application/vnd.github.v3+json",
         }
 
-        # Lấy nội dung cũ
         gist = requests.get(GIST_URL, headers=headers).json()
         current_data = json.loads(gist["files"]["users.json"]["content"])
 
-        # Nếu user chưa có → thêm vào
         if str(user_id) not in current_data:
             current_data[str(user_id)] = {"joined": True}
 
@@ -47,14 +76,43 @@ def save_user_to_gist(user_id):
                     }
                 }
             }
-
             requests.patch(GIST_URL, headers=headers, json=new_file_content)
 
     except Exception as e:
         print("Lỗi Gist:", e)
 
+
 # ==============================
-# Menu chính
+# LƯU ĐƠN HÀNG
+# ==============================
+def save_order_to_gist(user_id, data):
+    try:
+        headers = {
+            "Authorization": f"token {GIST_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+
+        gist = requests.get(GIST_URL, headers=headers).json()
+        current_data = json.loads(gist["files"]["orders.json"]["content"])
+
+        current_data[str(user_id)] = data
+
+        new_content = {
+            "files": {
+                "orders.json": {
+                    "content": json.dumps(current_data, indent=4)
+                }
+            }
+        }
+
+        requests.patch(GIST_URL, headers=headers, json=new_content)
+
+    except Exception as e:
+        print("Lỗi lưu order:", e)
+
+
+# ==============================
+# MENU CHÍNH
 # ==============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -66,46 +124,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     text = (
-        "🎉 **Chào mừng bạn đến với Bot Mẫu!**\n\n"
-        "Bot cung cấp menu demo cho mục đích học tập và nghiên cứu.\n"
+        "🎉 **Chào mừng bạn đến với Bot!**\n\n"
         "Bạn có thể:\n"
-        "- Xem các gói (GO / PLUS / TEAM)\n"
-        "- Nhận gói miễn phí thử nghiệm\n"
+        "- Mua gói (GO / PLUS / TEAM)\n"
+        "- Nhận gói miễn phí\n"
+        "Bot mẫu phục vụ học tập."
     )
 
-    await update.message.reply_markdown(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    if update.message:
+        await update.message.reply_markdown(
+            text, reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.callback_query.message.edit_text(
+            text, reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
 
 # ==============================
-# Menu mua gói
+# MENU MUA GÓI
 # ==============================
 async def buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("GO", callback_data="buy_go")],
-        [InlineKeyboardButton("PLUS", callback_data="buy_plus")],
-        [InlineKeyboardButton("TEAM", callback_data="buy_team")],
+        [InlineKeyboardButton("MAIN GO", callback_data="buy_go_main")],
+        [InlineKeyboardButton("MAIN PLUS", callback_data="buy_plus_main")],
+        [InlineKeyboardButton("MAIN TEAM", callback_data="buy_team_main")],
         [InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")],
     ]
 
     await update.callback_query.message.edit_text(
-        "🛒 **Chọn gói bạn muốn mua:**",
+        "🛒 **Chọn gói MAIN bạn muốn mua:**",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
 # ==============================
-# Nội dung từng gói
+# HIỂN THỊ GÓI MAIN + QR
 # ==============================
-async def show_price(update: Update, title, price_main, price_shared):
+async def show_main_package(update: Update, context: ContextTypes.DEFAULT_TYPE, package):
+    user = update.effective_user
+
+    username = user.username or f"id{user.id}"
+    amount = AMOUNTS[package]
+
+    qr_url = generate_qr(package, username, amount)
+
     text = (
-        f"📦 **{title}**\n\n"
-        f"💰 Giá chính: `{price_main}`\n"
-        f"💳 Giá chia sẻ: `{price_shared}`\n\n"
-        "⚠️ Đây là dữ liệu demo."
+        f"📦 **GÓI MAIN {package}**\n\n"
+        "Để kích hoạt gói, vui lòng gửi:\n"
+        "1. Email tài khoản\n"
+        "2. Ghi chú (nếu có)\n\n"
+        f"💳 Số tiền cần thanh toán: `{amount:,}đ`\n"
+        "📌 *Quét mã QR bên dưới để thanh toán.*\n\n"
+        "⏳ Vui lòng đợi admin kiểm tra giao dịch."
     )
 
-    await update.callback_query.message.edit_text(text, parse_mode="Markdown")
+    await update.callback_query.message.reply_markdown(text)
+    await update.callback_query.message.reply_photo(qr_url)
+
+    context.user_data["awaiting_info"] = package
+
 
 # ==============================
-# Menu miễn phí
+# MENU MIỄN PHÍ
 # ==============================
 async def free_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -116,23 +197,20 @@ async def free_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await update.callback_query.message.edit_text(
-        "🎁 **Chọn gói miễn phí muốn nhận:**",
+        "🎁 **Chọn gói miễn phí:**",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# ==============================
-# Sản phẩm demo miễn phí
-# ==============================
+
 async def free_item(update: Update, name):
     await update.callback_query.message.edit_text(
-        f"🎉 Bạn đã nhận **{name}**!\n"
-        "Đây chỉ là dữ liệu demo để bạn test bot.\n\n"
-        f"`DEMO-{name}-123456`",
+        f"🎉 Bạn đã nhận **{name}**!\nĐây là dữ liệu demo.\n\n`DEMO-{name}-123456`",
         parse_mode="Markdown",
     )
 
+
 # ==============================
-# Xử lý Callback
+# CALLBACK HANDLER
 # ==============================
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
@@ -146,15 +224,17 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back_main":
         return await start(update, context)
 
-    if data == "buy_go":
-        return await show_price(update, "Gói GO", "100.000đ", "50.000đ")
+    # GÓI MAIN
+    if data == "buy_go_main":
+        return await show_main_package(update, context, "GO")
 
-    if data == "buy_plus":
-        return await show_price(update, "Gói PLUS", "200.000đ", "100.000đ")
+    if data == "buy_plus_main":
+        return await show_main_package(update, context, "PLUS")
 
-    if data == "buy_team":
-        return await show_price(update, "Gói TEAM", "500.000đ", "250.000đ")
+    if data == "buy_team_main":
+        return await show_main_package(update, context, "TEAM")
 
+    # FREE ITEMS
     if data == "free_go":
         return await free_item(update, "GO")
 
@@ -166,13 +246,52 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==============================
-# Chạy bot
+# NHẬN EMAIL + GHI CHÚ
+# ==============================
+async def receive_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    package = context.user_data.get("awaiting_info")
+    if not package:
+        return
+
+    user = update.effective_user
+    info = update.message.text
+
+    save_order_to_gist(
+        user.id,
+        {
+            "username": user.username,
+            "package": package,
+            "info": info,
+        }
+    )
+
+    # Gửi admin
+    msg = (
+        f"🔥 **ĐƠN HÀNG MỚI**\n\n"
+        f"👤 User: @{user.username} (ID: {user.id})\n"
+        f"📦 Gói: {package}\n"
+        f"📩 Thông tin:\n{info}"
+    )
+    await context.bot.send_message(ADMIN_CHAT_ID, msg, parse_mode="Markdown")
+
+    # Báo khách
+    await update.message.reply_text(
+        "✅ Thông tin đã được ghi nhận.\nAdmin sẽ hỗ trợ bạn sớm!"
+    )
+
+    context.user_data["awaiting_info"] = None
+
+
+# ==============================
+# RUN BOT
 # ==============================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callbacks))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_user_info))
 
     app.run_polling()
 
