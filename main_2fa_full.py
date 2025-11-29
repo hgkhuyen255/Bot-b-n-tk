@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GIST_ID = os.getenv("GIST_ID")
 GIST_TOKEN = os.getenv("GIST_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+ADMIN_CHAT_ID = 5816758036
 if ADMIN_CHAT_ID:
     ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
 CLOUD_RUN_URL = os.getenv("CLOUD_RUN_SERVICE_URL", "")
@@ -213,6 +213,12 @@ def tg_edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mod
     except Exception as e:
         print("editMessageText error:", e)
 
+def send_admin_message(text, parse_mode=None):
+    """Gửi tin cho admin nếu đã cấu hình ADMIN_CHAT_ID."""
+    if not ADMIN_CHAT_ID:
+        print("ADMIN_CHAT_ID not set, skip admin message:", text)
+        return
+    tg_send_message(ADMIN_CHAT_ID, text, parse_mode=parse_mode)
 
 # ==============================
 #  UI KEYBOARDS & MENUS
