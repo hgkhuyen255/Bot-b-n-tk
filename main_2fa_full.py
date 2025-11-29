@@ -11,9 +11,17 @@ from fastapi.responses import PlainTextResponse
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GIST_ID = os.getenv("GIST_ID")
 GIST_TOKEN = os.getenv("GIST_TOKEN")
-ADMIN_CHAT_ID = 5816758036
-if ADMIN_CHAT_ID:
-    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
+
+# Có thể dùng env hoặc giữ mặc định 5816758036
+_admin_env = os.getenv("ADMIN_CHAT_ID")
+if _admin_env:
+    try:
+        ADMIN_CHAT_ID = int(_admin_env)
+    except ValueError:
+        ADMIN_CHAT_ID = 5816758036
+else:
+    ADMIN_CHAT_ID = 5816758036
+
 CLOUD_RUN_URL = os.getenv("CLOUD_RUN_SERVICE_URL", "")
 
 WEBHOOK_PATH = "/webhook"
@@ -172,7 +180,7 @@ def tg_send_message(chat_id, text, reply_markup=None, parse_mode=None):
 
     try:
         r = requests.post(url, json=payload, timeout=10)
-        # LOG để xem Telegram trả gì
+        # LOG để kiểm tra việc gửi tin
         print("TG sendMessage:", payload, "→", r.status_code, r.text)
     except Exception as e:
         print("sendMessage error:", e)
@@ -188,7 +196,8 @@ def tg_send_photo(chat_id, photo_url, caption=None, parse_mode=None, reply_marku
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        print("TG sendPhoto:", payload, "→", r.status_code, r.text)
     except Exception as e:
         print("sendPhoto error:", e)
 
@@ -196,7 +205,8 @@ def tg_send_photo(chat_id, photo_url, caption=None, parse_mode=None, reply_marku
 def tg_answer_callback_query(callback_query_id):
     url = f"{TG_BASE_URL}/answerCallbackQuery"
     try:
-        requests.post(url, json={"callback_query_id": callback_query_id}, timeout=10)
+        r = requests.post(url, json={"callback_query_id": callback_query_id}, timeout=10)
+        print("TG answerCallbackQuery:", r.status_code, r.text)
     except Exception as e:
         print("answerCallbackQuery error:", e)
 
@@ -209,16 +219,22 @@ def tg_edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mod
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        print("TG editMessageText:", payload, "→", r.status_code, r.text)
     except Exception as e:
         print("editMessageText error:", e)
 
-def send_admin_message(text, parse_mode=None):
-    """Gửi tin cho admin nếu đã cấu hình ADMIN_CHAT_ID."""
+
+def send_admin_message(text: str):
+    """
+    Gửi tin nhắn cho admin.
+    Không dùng Markdown để tránh lỗi parse (username có dấu _ , v.v.).
+    """
     if not ADMIN_CHAT_ID:
         print("ADMIN_CHAT_ID not set, skip admin message:", text)
         return
-    tg_send_message(ADMIN_CHAT_ID, text, parse_mode=parse_mode)
+    tg_send_message(ADMIN_CHAT_ID, text, parse_mode=None)
+
 
 # ==============================
 #  UI KEYBOARDS & MENUS
@@ -294,65 +310,63 @@ def payment_confirm_keyboard():
 
 def send_main_menu(chat_id):
     text = (
-        "🎉 *Chào mừng bạn đến với Bot!*\n\n"
+        "🎉 Chào mừng bạn đến với Bot!\n\n"
         "Bạn có thể:\n"
         "- Mua gói (GO / PLUS / TEAM / EDU)\n"
         "- Nhận gói miễn phí\n"
-        "_Bot mẫu phục vụ học tập._"
+        "Bot mẫu phục vụ học tập."
     )
-    tg_send_message(chat_id, text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    tg_send_message(chat_id, text, reply_markup=main_menu_keyboard())
 
 
 def send_buy_menu(chat_id, message_id=None):
     text = (
-        "🛒 *Chọn gói MAIN bạn muốn mua:*\n\n"
+        "🛒 Chọn gói MAIN bạn muốn mua:\n\n"
         "Mỗi gói sẽ có 2 lựa chọn:\n"
         "- Tài khoản shop cấp\n"
         "- Tài khoản chính chủ (nếu có)\n\n"
         "Bấm vào gói để xem chi tiết giá."
     )
     if message_id:
-        tg_edit_message_text(chat_id, message_id, text,
-                             reply_markup=buy_menu_keyboard(), parse_mode="Markdown")
+        tg_edit_message_text(chat_id, message_id, text, reply_markup=buy_menu_keyboard())
     else:
-        tg_send_message(chat_id, text, reply_markup=buy_menu_keyboard(), parse_mode="Markdown")
+        tg_send_message(chat_id, text, reply_markup=buy_menu_keyboard())
 
 
 def send_buy_type_menu(chat_id, package: str, message_id=None):
     prices = PACKAGE_PRICES.get(package, {})
-    desc_lines = [f"📦 *GÓI {package}*"]
+    desc_lines = [f"📦 GÓI {package}"]
     if "shop" in prices:
-        desc_lines.append(f"- TK shop cấp: `{prices['shop']}đ`")
+        desc_lines.append(f"- TK shop cấp: {prices['shop']}đ")
     if "own" in prices:
-        desc_lines.append(f"- TK chính chủ: `{prices['own']}đ`")
+        desc_lines.append(f"- TK chính chủ: {prices['own']}đ")
     text = "\n".join(desc_lines)
     if message_id:
         tg_edit_message_text(chat_id, message_id, text,
-                             reply_markup=buy_type_keyboard(package), parse_mode="Markdown")
+                             reply_markup=buy_type_keyboard(package))
     else:
-        tg_send_message(chat_id, text,
-                        reply_markup=buy_type_keyboard(package), parse_mode="Markdown")
+        tg_send_message(chat_id, text, reply_markup=buy_type_keyboard(package))
 
 
 def send_free_menu(chat_id, message_id=None):
     text = (
-        "🎁 *Chọn gói miễn phí:*\n\n"
+        "🎁 Chọn gói miễn phí:\n\n"
         "Tài khoản miễn phí được cấp tự động từ kho riêng,\n"
         "không ảnh hưởng đến tài khoản shop bán."
     )
     if message_id:
         tg_edit_message_text(chat_id, message_id, text,
-                             reply_markup=free_menu_keyboard(), parse_mode="Markdown")
+                             reply_markup=free_menu_keyboard())
     else:
-        tg_send_message(chat_id, text, reply_markup=free_menu_keyboard(), parse_mode="Markdown")
+        tg_send_message(chat_id, text, reply_markup=free_menu_keyboard())
 
 
 def send_free_item_from_gist(chat_id, package: str, message_id=None):
     account = get_and_consume_account(FREE_ACCOUNTS_FILE, package)
     if account:
         text = (
-            f"🎉 Đây là tài khoản *miễn phí {package}* của bạn:\n\n"
-            f"`{account}`\n\n"
+            f"🎉 Đây là tài khoản miễn phí {package} của bạn:\n\n"
+            f"{account}\n\n"
             "Chúc bạn trải nghiệm vui vẻ!"
         )
     else:
@@ -361,9 +375,9 @@ def send_free_item_from_gist(chat_id, package: str, message_id=None):
             "Vui lòng thử lại sau hoặc chọn gói khác."
         )
     if message_id:
-        tg_edit_message_text(chat_id, message_id, text, parse_mode="Markdown")
+        tg_edit_message_text(chat_id, message_id, text)
     else:
-        tg_send_message(chat_id, text, parse_mode="Markdown")
+        tg_send_message(chat_id, text)
 
 
 def show_main_package(chat_id, user_id, username, package, account_type, message_id=None):
@@ -373,20 +387,19 @@ def show_main_package(chat_id, user_id, username, package, account_type, message
     qr_url, amount, payment_code = generate_qr(package, account_type, user_id, username)
     type_text = "tài khoản shop cấp" if account_type == "shop" else "tài khoản chính chủ"
     caption = (
-        f"📦 *GÓI MAIN {package} - {type_text}*\n\n"
+        f"📦 GÓI MAIN {package} - {type_text}\n\n"
         "Để kích hoạt gói, vui lòng:\n"
         "1️⃣ Quét mã QR này để thanh toán.\n"
-        "2️⃣ Sau khi chuyển khoản, bấm nút *“Tôi đã chuyển khoản”* bên dưới.\n"
-        "3️⃣ Gửi cho bot *email tài khoản + ghi chú* (nếu có).\n\n"
-        f"💳 Số tiền cần thanh toán: `{amount}đ`\n"
-        f"🧾 Nội dung chuyển khoản (addInfo): `{payment_code}`\n"
+        "2️⃣ Sau khi chuyển khoản, bấm nút “Tôi đã chuyển khoản” bên dưới.\n"
+        "3️⃣ Gửi cho bot email tài khoản + ghi chú (nếu có).\n\n"
+        f"💳 Số tiền cần thanh toán: {amount}đ\n"
+        f"🧾 Nội dung chuyển khoản (addInfo): {payment_code}\n"
         "⏳ Khi hệ thống xác nhận thanh toán, bot sẽ tự động cấp tài khoản / nâng cấp gói."
     )
     tg_send_photo(
         chat_id,
         qr_url,
         caption=caption,
-        parse_mode="Markdown",
         reply_markup=payment_confirm_keyboard(),
     )
     USER_STATE[user_id] = {
@@ -445,9 +458,8 @@ def process_paid_order(order: dict, payment_code: str,
         if shop_account:
             tg_send_message(
                 user_chat_id,
-                "🎉 *Thanh toán đã được xác nhận!*\n\n"
-                f"Đây là tài khoản của bạn:\n`{shop_account}`",
-                parse_mode="Markdown",
+                "🎉 Thanh toán đã được xác nhận!\n\n"
+                f"Đây là tài khoản của bạn:\n{shop_account}",
             )
         else:
             tg_send_message(
@@ -458,16 +470,11 @@ def process_paid_order(order: dict, payment_code: str,
         tg_send_message(
             user_chat_id,
             "🎉 Thanh toán đã xác nhận!\nAdmin sẽ nâng cấp tài khoản chính chủ của bạn.",
-            parse_mode="Markdown",
         )
 
-    if ADMIN_CHAT_ID:
-        tg_send_message(
-            ADMIN_CHAT_ID,
-            f"✔ Đơn `{payment_code}` đã được xác nhận.\n"
-            f"User: @{username}",
-            parse_mode="Markdown",
-        )
+    send_admin_message(
+        f"✔ Đơn {payment_code} đã được xác nhận thủ công cho @{username}"
+    )
 
 
 def handle_admin_confirm(chat_id, user_id, text):
@@ -478,7 +485,7 @@ def handle_admin_confirm(chat_id, user_id, text):
     /xacnhan_thua <code> <sotien_da_chuyen>
     /xacnhan_khong <code>
     """
-    if not ADMIN_CHAT_ID or str(user_id) != str(ADMIN_CHAT_ID):
+    if not ADMIN_CHAT_ID or user_id != ADMIN_CHAT_ID:
         tg_send_message(chat_id, "❌ Bạn không phải ADMIN.")
         return
 
@@ -488,13 +495,13 @@ def handle_admin_confirm(chat_id, user_id, text):
     # /xacnhan <payment_code>  → coi như đã thanh toán đủ
     if cmd == "/xacnhan":
         if len(parts) < 2:
-            tg_send_message(chat_id, "❗ Dùng: /xacnhan <payment_code>")
+            tg_send_message(chat_id, "Dùng: /xacnhan <payment_code>")
             return
         payment_code = parts[1]
         orders = load_gist_json(PENDING_ORDERS_FILE)
         order = orders.get(payment_code)
         if not order:
-            tg_send_message(chat_id, "❌ Không tìm thấy đơn.")
+            tg_send_message(chat_id, "Không tìm thấy đơn.")
             return
         process_paid_order(order, payment_code, manual=True)
         return
@@ -502,33 +509,28 @@ def handle_admin_confirm(chat_id, user_id, text):
     # /xacnhan_thieu <code> <da_chuyen>
     if cmd == "/xacnhan_thieu":
         if len(parts) < 3:
-            tg_send_message(chat_id, "❗ Dùng: /xacnhan_thieu <payment_code> <sotien_da_chuyen>")
+            tg_send_message(chat_id, "Dùng: /xacnhan_thieu <payment_code> <sotien_da_chuyen>")
             return
         payment_code = parts[1]
         try:
             amount = int(parts[2])
         except ValueError:
-            tg_send_message(chat_id, "❌ Số tiền không hợp lệ.")
+            tg_send_message(chat_id, "Số tiền không hợp lệ.")
             return
         orders = load_gist_json(PENDING_ORDERS_FILE)
         order = orders.get(payment_code)
         if not order:
-            tg_send_message(chat_id, "❌ Không tìm thấy đơn.")
+            tg_send_message(chat_id, "Không tìm thấy đơn.")
             return
         expected = PACKAGE_PRICES[order["package"]][order["account_type"]]
         missing = expected - amount
         tg_send_message(
             order["chat_id"],
-            f"⚠️ Bạn đã *chuyển thiếu* {missing}đ.\n"
-            f"Vui lòng chuyển nốt số tiền còn thiếu với nội dung:\n`{payment_code}`",
-            parse_mode="Markdown",
+            f"Bạn đã chuyển thiếu {missing}đ. Vui lòng chuyển nốt với nội dung: {payment_code}",
         )
-        if ADMIN_CHAT_ID:
-            tg_send_message(
-                ADMIN_CHAT_ID,
-                f"⚠️ Đơn `{payment_code}` – KHÁCH CHUYỂN THIẾU {missing}đ.",
-                parse_mode="Markdown",
-            )
+        send_admin_message(
+            f"Đơn {payment_code} – khách chuyển thiếu {missing}đ."
+        )
         order["status"] = "underpaid"
         save_gist_json(PENDING_ORDERS_FILE, orders)
         return
@@ -536,59 +538,49 @@ def handle_admin_confirm(chat_id, user_id, text):
     # /xacnhan_thua <code> <da_chuyen>
     if cmd == "/xacnhan_thua":
         if len(parts) < 3:
-            tg_send_message(chat_id, "❗ Dùng: /xacnhan_thua <payment_code> <sotien_da_chuyen>")
+            tg_send_message(chat_id, "Dùng: /xacnhan_thua <payment_code> <sotien_da_chuyen>")
             return
         payment_code = parts[1]
         try:
             amount = int(parts[2])
         except ValueError:
-            tg_send_message(chat_id, "❌ Số tiền không hợp lệ.")
+            tg_send_message(chat_id, "Số tiền không hợp lệ.")
             return
         orders = load_gist_json(PENDING_ORDERS_FILE)
         order = orders.get(payment_code)
         if not order:
-            tg_send_message(chat_id, "❌ Không tìm thấy đơn.")
+            tg_send_message(chat_id, "Không tìm thấy đơn.")
             return
         expected = PACKAGE_PRICES[order["package"]][order["account_type"]]
         over = amount - expected
         tg_send_message(
             order["chat_id"],
-            f"ℹ️ Bạn đã *chuyển thừa* {over}đ.\n"
-            "Hệ thống vẫn kích hoạt gói như bình thường.",
-            parse_mode="Markdown",
+            f"Bạn đã chuyển thừa {over}đ. Hệ thống vẫn kích hoạt gói như bình thường.",
         )
-        if ADMIN_CHAT_ID:
-            tg_send_message(
-                ADMIN_CHAT_ID,
-                f"ℹ️ Đơn `{payment_code}` – KHÁCH CHUYỂN THỪA {over}đ.",
-                parse_mode="Markdown",
-            )
+        send_admin_message(
+            f"Đơn {payment_code} – khách chuyển thừa {over}đ."
+        )
         process_paid_order(order, payment_code, order_amount=amount, manual=True)
         return
 
     # /xacnhan_khong <payment_code>
     if cmd == "/xacnhan_khong":
         if len(parts) < 2:
-            tg_send_message(chat_id, "❗ Dùng: /xacnhan_khong <payment_code>")
+            tg_send_message(chat_id, "Dùng: /xacnhan_khong <payment_code>")
             return
         payment_code = parts[1]
         orders = load_gist_json(PENDING_ORDERS_FILE)
         order = orders.get(payment_code)
         if not order:
-            tg_send_message(chat_id, "❌ Không tìm thấy đơn.")
+            tg_send_message(chat_id, "Không tìm thấy đơn.")
             return
         tg_send_message(
             order["chat_id"],
-            "❌ Hệ thống *không tìm thấy giao dịch* nào theo mã này.\n"
-            "Vui lòng kiểm tra lại hoặc thực hiện thanh toán.",
-            parse_mode="Markdown",
+            "Hệ thống không thấy giao dịch cho đơn này. Nếu bạn đã chuyển, vui lòng liên hệ admin.",
         )
-        if ADMIN_CHAT_ID:
-            tg_send_message(
-                ADMIN_CHAT_ID,
-                f"❌ Đơn `{payment_code}` được đánh dấu KHÔNG THANH TOÁN.",
-                parse_mode="Markdown",
-            )
+        send_admin_message(
+            f"Đơn {payment_code} được đánh dấu KHÔNG THANH TOÁN."
+        )
         order["status"] = "no_payment"
         save_gist_json(PENDING_ORDERS_FILE, orders)
         return
@@ -597,20 +589,11 @@ def handle_admin_confirm(chat_id, user_id, text):
 # ==============================
 #  FASTAPI APP & WEBHOOK
 # ==============================
-# ==============================
-#      FASTAPI APP
-# ==============================
-
 app = FastAPI()
 
 
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
-    """
-    Webhook nhận update từ Telegram:
-    - message        (text, /start, ...)
-    - callback_query (nhấn nút inline)
-    """
     try:
         update = await request.json()
         print("Incoming update:", update)
@@ -638,7 +621,6 @@ async def telegram_webhook(request: Request):
         if not chat_id:
             return PlainTextResponse("OK")
 
-        # MENU CHÍNH / MUA / FREE
         if data == "buy":
             send_buy_menu(chat_id, message_id)
         elif data == "free":
@@ -648,7 +630,6 @@ async def telegram_webhook(request: Request):
         elif data == "back_buy":
             send_buy_menu(chat_id, message_id)
 
-        # CHỌN GÓI
         elif data == "buy_go_main":
             send_buy_type_menu(chat_id, "GO", message_id)
         elif data == "buy_plus_main":
@@ -658,25 +639,18 @@ async def telegram_webhook(request: Request):
         elif data == "buy_edu_main":
             send_buy_type_menu(chat_id, "EDU", message_id)
 
-        # CHỌN LOẠI TÀI KHOẢN (GO)
         elif data == "buy_go_shop":
             show_main_package(chat_id, user_id, username, "GO", "shop", message_id)
         elif data == "buy_go_own":
             show_main_package(chat_id, user_id, username, "GO", "own", message_id)
-
-        # PLUS
         elif data == "buy_plus_shop":
             show_main_package(chat_id, user_id, username, "PLUS", "shop", message_id)
         elif data == "buy_plus_own":
             show_main_package(chat_id, user_id, username, "PLUS", "own", message_id)
-
-        # TEAM
         elif data == "buy_team_shop":
             show_main_package(chat_id, user_id, username, "TEAM", "shop", message_id)
         elif data == "buy_team_own":
             show_main_package(chat_id, user_id, username, "TEAM", "own", message_id)
-
-        # EDU (chỉ shop)
         elif data == "buy_edu_shop":
             show_main_package(chat_id, user_id, username, "EDU", "shop", message_id)
 
@@ -690,35 +664,30 @@ async def telegram_webhook(request: Request):
             if not (package and payment_code):
                 tg_send_message(
                     chat_id,
-                    "❌ Không tìm thấy đơn cần xác nhận.\nVui lòng dùng /start để chọn gói lại.",
+                    "Bot không tìm thấy đơn cần xác nhận. Vui lòng dùng /start để chọn gói lại.",
+                )
+                send_admin_message(
+                    f"Khách @{username} (ID {user_id}) bấm 'Tôi đã chuyển khoản' nhưng không có payment_code."
                 )
                 return PlainTextResponse("OK")
 
-            # Cập nhật trạng thái đơn trong pending_orders.json
             orders = load_gist_json(PENDING_ORDERS_FILE)
             if payment_code in orders:
                 orders[payment_code]["status"] = "user_confirmed"
                 save_gist_json(PENDING_ORDERS_FILE, orders)
 
-            # Báo admin
-            if ADMIN_CHAT_ID:
-                admin_msg = (
-                    "✅ *KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN*\n\n"
-                    f"👤 User: @{username} (ID: {user_id})\n"
-                    f"📦 Gói: {package} ({account_type})\n"
-                    f"💳 Mã thanh toán: `{payment_code}`\n\n"
-                    "⏳ Vui lòng kiểm tra giao dịch trên app ngân hàng / hệ thống thanh toán."
-                )
-                send_admin_message(admin_msg, parse_mode="Markdown")
-
-            # Báo khách
-            tg_send_message(
-                chat_id,
-                "✅ Cảm ơn bạn! Hệ thống sẽ kiểm tra thanh toán và cấp tài khoản sớm nhất.\n"
-                "Bạn có thể chờ tin nhắn tiếp theo từ bot.",
+            send_admin_message(
+                f"KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN\n"
+                f"User: @{username} (ID {user_id})\n"
+                f"Gói: {package} ({account_type})\n"
+                f"Mã thanh toán: {payment_code}"
             )
 
-        # FREE ITEMS (lấy từ Gist)
+            tg_send_message(
+                chat_id,
+                "✅ Cảm ơn bạn! Hệ thống sẽ kiểm tra thanh toán và cấp tài khoản sớm nhất.",
+            )
+
         elif data == "free_go":
             send_free_item_from_gist(chat_id, "GO", message_id)
         elif data == "free_edu":
@@ -743,46 +712,16 @@ async def telegram_webhook(request: Request):
     if not chat_id or not user_id:
         return PlainTextResponse("OK")
 
-    # LỆNH ADMIN: /nopay <payment_code>
-    if ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID):
-        if text.startswith("/nopay "):
-            code = text.split(" ", 1)[1].strip()
-            orders = load_gist_json(PENDING_ORDERS_FILE)
-            order = orders.get(code)
-            if not order:
-                tg_send_message(chat_id, f"❌ Không tìm thấy đơn với mã: {code}")
-                return PlainTextResponse("OK")
+    # LỆNH ADMIN
+    if text.startswith(("/xacnhan", "/xacnhan_thieu", "/xacnhan_thua", "/xacnhan_khong")):
+        handle_admin_confirm(chat_id, user_id, text)
+        return PlainTextResponse("OK")
 
-            orders[code]["status"] = "no_payment"
-            save_gist_json(PENDING_ORDERS_FILE, orders)
-
-            user_chat_id = order["chat_id"]
-            expected_amount = PACKAGE_PRICES[order["package"]][order["account_type"]]
-
-            # Báo khách
-            tg_send_message(
-                user_chat_id,
-                "⚠ Hệ thống hiện *chưa thấy giao dịch chuyển khoản* tương ứng với đơn của bạn.\n"
-                "Nếu bạn đã chuyển, vui lòng gửi lại hóa đơn/sao kê cho admin để kiểm tra.\n"
-                f"Số tiền cần thanh toán cho đơn này là: `{expected_amount}đ`.",
-                parse_mode="Markdown",
-            )
-
-            # Xác nhận cho admin
-            tg_send_message(
-                chat_id,
-                f"✅ Đã đánh dấu đơn `{code}` là *không thấy tiền* và báo lại cho khách.",
-                parse_mode="Markdown",
-            )
-            return PlainTextResponse("OK")
-
-    # /start: lưu user + gửi menu
     if text.startswith("/start"):
         save_user_to_gist(user_id)
         send_main_menu(chat_id)
         return PlainTextResponse("OK")
 
-    # Nếu user đang ở trạng thái "awaiting_info" -> chỉ lưu info, chưa cấp tài khoản
     state = USER_STATE.get(user_id) or {}
     package = state.get("awaiting_info")
     account_type = state.get("account_type")
@@ -790,37 +729,26 @@ async def telegram_webhook(request: Request):
 
     if package and payment_code:
         info = text
-
-        # cập nhật info vào pending_orders.json
         update_pending_order_info(payment_code, info)
 
-        # báo admin: khách đã gửi info, chờ thanh toán
-        if ADMIN_CHAT_ID:
-            admin_msg = (
-                "📝 *KHÁCH GỬI THÔNG TIN*\n\n"
-                f"👤 User: @{username} (ID: {user_id})\n"
-                f"📦 Gói: {package} ({account_type})\n"
-                f"💳 Mã thanh toán: `{payment_code}`\n"
-                f"📩 Thông tin:\n{info}\n\n"
-                f"⏳ Đơn đang chờ thanh toán."
-            )
-            tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
-
-        # báo khách
-        tg_send_message(
-            chat_id,
-            "✅ Đã nhận thông tin của bạn.\n"
-            "Sau khi thanh toán được xác nhận, bot sẽ tự động xử lý và cấp tài khoản.",
+        send_admin_message(
+            f"KHÁCH GỬI THÔNG TIN\n"
+            f"User: @{username} (ID {user_id})\n"
+            f"Gói: {package} ({account_type})\n"
+            f"Mã thanh toán: {payment_code}\n"
+            f"Thông tin:\n{info}"
         )
 
+        tg_send_message(
+            chat_id,
+            "✅ Đã nhận thông tin của bạn. Sau khi thanh toán được xác nhận, bot sẽ tự động xử lý và cấp tài khoản.",
+        )
         return PlainTextResponse("OK")
 
-    # Nếu không ở trạng thái mua gói, trả lời hướng dẫn chung
     tg_send_message(
         chat_id,
         "ℹ️ Vui lòng dùng /start để mở menu và chọn gói.",
     )
-
     return PlainTextResponse("OK")
 
 
@@ -833,11 +761,6 @@ async def payment_webhook(request: Request):
         "code": "GO-shop-username",
         "amount": 50000
     }
-
-    Xử lý 4 trạng thái:
-    - Chuyển đủ  : cấp tài khoản / nâng cấp
-    - Chuyển thừa: vẫn cấp + cảnh báo admin
-    - Chuyển thiếu: giữ pending + báo khách + báo admin
     """
     try:
         data = await request.json()
@@ -845,7 +768,7 @@ async def payment_webhook(request: Request):
         return {"ok": False, "error": "invalid_json"}
 
     payment_code = data.get("code")
-    amount = data.get("amount")  # số tiền thực tế ngân hàng báo về (int)
+    amount = data.get("amount")
 
     if not payment_code:
         return {"ok": False, "error": "missing_code"}
@@ -864,64 +787,40 @@ async def payment_webhook(request: Request):
 
     expected_amount = PACKAGE_PRICES[package][account_type]
 
-    # 1) XÁC ĐỊNH TRẠNG THÁI TIỀN
     if amount is None:
-        # Không có số tiền thì coi như lỗi payload
-        return {
-            "ok": False,
-            "error": "missing_amount",
-            "expected": expected_amount,
-        }
+        return {"ok": False, "error": "missing_amount", "expected": expected_amount}
 
-    if amount == expected_amount:
-        pay_status = "exact"      # chuyển đủ
-    elif amount > expected_amount:
-        pay_status = "over"       # chuyển thừa
-    else:
-        pay_status = "under"      # chuyển thiếu
-
-    # 2) CHUYỂN THIẾU → GIỮ PENDING
-    if pay_status == "under":
-        # Cập nhật trạng thái đơn
+    if amount < expected_amount:
+        diff = expected_amount - amount
         orders[payment_code]["status"] = "underpaid"
         orders[payment_code]["amount"] = amount
         save_gist_json(PENDING_ORDERS_FILE, orders)
 
-        # Báo admin
-        if ADMIN_CHAT_ID:
-            diff = expected_amount - amount
-            admin_msg = (
-                "⚠ *KHÁCH CHUYỂN THIẾU TIỀN*\n\n"
-                f"👤 User: @{username} (ID: {user_id})\n"
-                f"📦 Gói: {package} ({account_type})\n"
-                f"💳 Mã thanh toán: `{payment_code}`\n"
-                f"💵 Đã chuyển: `{amount}đ` / Cần: `{expected_amount}đ`\n"
-                f"❗ Thiếu: `{diff}đ`\n\n"
-                "Đơn vẫn được giữ ở trạng thái pending."
-            )
-            tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
-
-        # Báo khách
-        diff = expected_amount - amount
-        user_msg = (
-            "⚠ *Thanh toán chưa đủ số tiền cần thiết!*\n\n"
-            f"Bạn đã chuyển: `{amount}đ`\n"
-            f"Số tiền cần thanh toán: `{expected_amount}đ`\n"
-            f"Số tiền còn thiếu: `{diff}đ`\n\n"
-            "Vui lòng chuyển nốt phần tiền còn thiếu, sau đó bấm lại nút *“Tôi đã chuyển khoản”* "
-            "hoặc liên hệ admin nếu cần hỗ trợ."
+        send_admin_message(
+            f"KHÁCH CHUYỂN THIẾU TIỀN\n"
+            f"User: @{username} (ID {user_id})\n"
+            f"Gói: {package} ({account_type})\n"
+            f"Mã: {payment_code}\n"
+            f"Đã chuyển: {amount}đ / Cần: {expected_amount}đ\n"
+            f"Thiếu: {diff}đ"
         )
-        tg_send_message(chat_id, user_msg, parse_mode="Markdown")
 
+        tg_send_message(
+            chat_id,
+            "⚠ Thanh toán chưa đủ số tiền cần thiết!\n"
+            f"Bạn đã chuyển: {amount}đ – cần: {expected_amount}đ.\n"
+            f"Thiếu: {diff}đ.\n"
+            "Vui lòng chuyển nốt phần còn thiếu.",
+        )
         return {"ok": True, "status": "underpaid"}
 
-    # 3) CHUYỂN ĐỦ HOẶC THỪA → CẤP
+    # đủ hoặc thừa
     shop_account = None
     if account_type == "shop":
         shop_account = get_and_consume_account(SHOP_ACCOUNTS_FILE, package)
 
-    # Lưu đơn đã thanh toán (phân biệt exact / overpaid)
-    final_status = "paid_exact" if pay_status == "exact" else "paid_over"
+    final_status = "paid_exact" if amount == expected_amount else "paid_over"
+
     save_order_to_gist(
         user_id,
         {
@@ -937,77 +836,55 @@ async def payment_webhook(request: Request):
         },
     )
 
-    # Xóa khỏi pending
     try:
         del orders[payment_code]
         save_gist_json(PENDING_ORDERS_FILE, orders)
     except Exception as e:
         print("remove pending error:", e)
 
-    # ----- THÔNG BÁO ADMIN -----
-    if ADMIN_CHAT_ID:
-        over_note = ""
-        if pay_status == "over":
-            diff = amount - expected_amount
-            over_note = (
-                f"\n⚠ KHÁCH *CHUYỂN THỪA* `{diff}đ` – anh/chị chủ động xử lý hoàn/ghi nhận nhé."
-            )
+    over_note = ""
+    if amount > expected_amount:
+        diff = amount - expected_amount
+        over_note = f"\nKhách chuyển thừa {diff}đ."
 
-        admin_msg = (
-            "💰 *THANH TOÁN THÀNH CÔNG*\n\n"
-            f"👤 User: @{username} (ID: {user_id})\n"
-            f"📦 Gói: {package} ({account_type})\n"
-            f"💳 Mã thanh toán: `{payment_code}`\n"
-            f"💵 Số tiền: `{amount}đ` (yêu cầu: `{expected_amount}đ`)\n"
-            f"📩 Thông tin:\n{info or '(không có)'}\n\n"
-        )
-        if shop_account:
-            admin_msg += f"🔐 TK shop cấp: `{shop_account}`"
-        else:
-            if account_type == "shop":
-                admin_msg += "⚠ Không lấy được tài khoản shop (hết hàng?)."
-            else:
-                admin_msg += "🔧 Gói chính chủ – cần admin xử lý nâng cấp tài khoản."
+    send_admin_message(
+        f"THANH TOÁN THÀNH CÔNG\n"
+        f"User: @{username} (ID {user_id})\n"
+        f"Gói: {package} ({account_type})\n"
+        f"Mã thanh toán: {payment_code}\n"
+        f"Số tiền: {amount}đ (yêu cầu: {expected_amount}đ)\n"
+        f"Thông tin: {info or '(không có)'}\n"
+        f"Tài khoản shop cấp: {shop_account or '(không có)'}"
+        f"{over_note}"
+    )
 
-        admin_msg += over_note
-        tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
-
-    # ----- THÔNG BÁO KHÁCH -----
     if account_type == "shop":
         if shop_account:
             user_msg = (
-                "✅ Hệ thống đã xác nhận *thanh toán thành công*.\n\n"
-                "Đây là tài khoản shop cấp của bạn:\n"
-                f"`{shop_account}`\n\n"
-                "Cảm ơn bạn đã sử dụng dịch vụ!"
+                "✅ Hệ thống đã xác nhận thanh toán thành công.\n\n"
+                f"Đây là tài khoản shop cấp của bạn:\n{shop_account}"
             )
         else:
             user_msg = (
-                "✅ Hệ thống đã xác nhận *thanh toán thành công*.\n"
+                "✅ Hệ thống đã xác nhận thanh toán thành công.\n"
                 "Hiện kho tài khoản đang được cập nhật, admin sẽ cấp tài khoản cho bạn sớm nhất."
             )
-    else:  # chính chủ
+    else:
         user_msg = (
-            "✅ Hệ thống đã xác nhận *thanh toán thành công*.\n"
+            "✅ Hệ thống đã xác nhận thanh toán thành công.\n"
             "Admin sẽ tiến hành nâng cấp / thiết lập gói cho tài khoản chính chủ của bạn."
         )
 
-    # Nếu khách chuyển thừa, nhắc nhẹ
-    if pay_status == "over":
+    if amount > expected_amount:
         diff = amount - expected_amount
-        user_msg += (
-            f"\n\nℹ Hệ thống ghi nhận bạn đã chuyển thừa `{diff}đ`. "
-            "Admin sẽ hỗ trợ xử lý phần chênh lệch (nếu cần)."
-        )
+        user_msg += f"\n\nℹ Hệ thống ghi nhận bạn đã chuyển thừa {diff}đ."
 
-    tg_send_message(chat_id, user_msg, parse_mode="Markdown")
-
+    tg_send_message(chat_id, user_msg)
     return {"ok": True, "status": final_status}
 
 
 @app.get("/")
 def home():
-    # Endpoint test khi mở trình duyệt
     return {
         "status": "running",
         "webhook_path": WEBHOOK_PATH,
