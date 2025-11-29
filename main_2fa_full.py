@@ -12,6 +12,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GIST_ID = os.getenv("GIST_ID")
 GIST_TOKEN = os.getenv("GIST_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+if ADMIN_CHAT_ID:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
 CLOUD_RUN_URL = os.getenv("CLOUD_RUN_SERVICE_URL", "")
 
 WEBHOOK_PATH = "/webhook"
