@@ -11,5 +11,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy toàn bộ code vào container
 COPY . .
 
-# Cloud Run sẽ tự đặt PORT trong biến môi trường, ta đọc nó khi chạy
-CMD exec uvicorn main_2fa_full:app --host 0.0.0.0 --port ${PORT:-8080}
+# Chạy bot webhook bằng aiohttp
+CMD ["python", "Bot_tk.py"]
