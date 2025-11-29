@@ -169,8 +169,11 @@ def tg_send_message(chat_id, text, reply_markup=None, parse_mode=None):
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
+
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        # LOG để xem Telegram trả gì
+        print("TG sendMessage:", payload, "→", r.status_code, r.text)
     except Exception as e:
         print("sendMessage error:", e)
 
@@ -700,7 +703,7 @@ async def telegram_webhook(request: Request):
                     f"💳 Mã thanh toán: `{payment_code}`\n\n"
                     "⏳ Vui lòng kiểm tra giao dịch trên app ngân hàng / hệ thống thanh toán."
                 )
-                tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
+                send_admin_message(admin_msg, parse_mode="Markdown")
 
             # Báo khách
             tg_send_message(
