@@ -2,246 +2,157 @@ import os
 import json
 import requests
 from fastapi import FastAPI, Request
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from telegram import Update
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
+    ContextTypes,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    ContextTypes,
     filters,
 )
 
-# ======================================
-# CONFIG
-# ======================================
+# ==============================
+#  ENV
+# ==============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GIST_ID = os.getenv("GIST_ID")
 GIST_TOKEN = os.getenv("GIST_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+CLOUD_RUN_URL = os.getenv("CLOUD_RUN_SERVICE_URL")
 
-BANK_ID = "970436"
-ACCOUNT_NUMBER = "0711000283429"
-
-AMOUNTS = {
-    "GO": 50000,
-    "PLUS": 100000,
-    "TEAM": 200000,
-}
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"{CLOUD_RUN_URL}{WEBHOOK_PATH}"
 
 GIST_URL = f"https://api.github.com/gists/{GIST_ID}"
 
-# ======================================
-# HELPER: TẠO QR
-# ======================================
-def generate_qr(package_name, username, amount):
-    addinfo = f"{package_name}-{username}"
-    return (
-        f"https://img.vietqr.io/image/{BANK_ID}-{ACCOUNT_NUMBER}-compact.png"
-        f"?amount={amount}&addInfo={addinfo}"
-    )
+headers = {
+    "Authorization": f"token {GIST_TOKEN}",
+    "Accept": "application/vnd.github.v3+json",
+}
 
-# ======================================
-# LƯU USER
-# ======================================
-def save_user_to_gist(user_id):
+# ==============================
+#  GIST HELPERS
+# ==============================
+
+def load_gist_json(filename):
     try:
-        headers = {
-            "Authorization": f"token {GIST_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-        }
-
         gist = requests.get(GIST_URL, headers=headers).json()
-        current = json.loads(gist["files"]["users.json"]["content"])
-
-        if str(user_id) not in current:
-            current[str(user_id)] = {"joined": True}
-
-            requests.patch(
-                GIST_URL,
-                headers=headers,
-                json={"files": {"users.json": {"content": json.dumps(current, indent=4)}}},
-            )
+        content = gist["files"][filename]["content"]
+        return json.loads(content)
     except Exception as e:
-        print("GIST error:", e)
+        print("GIST READ ERR:", e)
+        return {}
 
-# ======================================
-# LƯU ORDER
-# ======================================
-def save_order_to_gist(user_id, data):
+def save_gist_json(filename, data):
     try:
-        headers = {
-            "Authorization": f"token {GIST_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-        }
-        gist = requests.get(GIST_URL, headers=headers).json()
-        current = json.loads(gist["files"]["orders.json"]["content"])
-
-        current[str(user_id)] = data
-
         requests.patch(
             GIST_URL,
             headers=headers,
-            json={"files": {"orders.json": {"content": json.dumps(current, indent=4)}}},
+            json={"files": {filename: {"content": json.dumps(data, indent=4)}}},
         )
     except Exception as e:
-        print("Order save error:", e)
+        print("GIST WRITE ERR:", e)
 
-# ======================================
-# START
-# ======================================
+
+def save_user_to_gist(user_id):
+    users = load_gist_json("users.json")
+
+    if str(user_id) not in users:
+        users[str(user_id)] = {"joined": True}
+        save_gist_json("users.json", users)
+
+
+def save_order_to_gist(user_id, data):
+    orders = load_gist_json("orders.json")
+    orders[str(user_id)] = data
+    save_gist_json("orders.json", orders)
+
+
+# ==============================
+#   TELEGRAM HANDLERS
+# ==============================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_chat_action("typing")
-
-    save_user_to_gist(update.effective_user.id)
-
-    keyboard = [
-        [InlineKeyboardButton("🛒 Mua gói", callback_data="buy")],
-        [InlineKeyboardButton("🎁 Gói miễn phí", callback_data="free")],
-    ]
-
-    text = (
-        "🎉 **Chào mừng bạn đến Bot!**\n\n"
-        "- Mua gói GO / PLUS / TEAM\n"
-        "- Nhận gói miễn phí\n"
-    )
-
-    await update.message.reply_markdown(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ======================================
-# MENU MUA
-# ======================================
-async def buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton("MAIN GO", callback_data="buy_go_main")],
-        [InlineKeyboardButton("MAIN PLUS", callback_data="buy_plus_main")],
-        [InlineKeyboardButton("MAIN TEAM", callback_data="buy_team_main")],
-        [InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")],
-    ]
-    await update.callback_query.message.edit_text(
-        "🛒 **Chọn gói MAIN:**", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def show_main_package(update: Update, context, package):
-    await update.callback_query.answer()
-
     user = update.effective_user
-    username = user.username or f"id{user.id}"
-    amount = AMOUNTS[package]
+    save_user_to_gist(user.id)
 
-    qr_url = generate_qr(package, username, amount)
-
-    text = (
-        f"📦 **GÓI MAIN {package}**\n"
-        f"💳 Thanh toán: `{amount:,}đ`\n"
-        f"📌 Quét mã QR bên dưới.\n"
-        f"⏳ Chờ admin duyệt."
-    )
-
-    await update.callback_query.message.reply_markdown(text)
-    await update.callback_query.message.reply_photo(qr_url)
-
-    context.user_data["awaiting_info"] = package
-
-# ======================================
-# FREE PACKAGES
-# ======================================
-async def free_menu(update: Update, context):
-    await update.callback_query.answer()
-
-    kb = [
-        [InlineKeyboardButton("Miễn phí GO", callback_data="free_go")],
-        [InlineKeyboardButton("Miễn phí EDU", callback_data="free_edu")],
-        [InlineKeyboardButton("Miễn phí PLUS", callback_data="free_plus")],
-        [InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")],
+    keyboard = [
+        [{"text": "📦 Mua gói", "callback_data": "buy"}],
+        [{"text": "🎁 Miễn phí", "callback_data": "free"}],
     ]
-
-    await update.callback_query.message.edit_text(
-        "🎁 **Chọn gói miễn phí:**", reply_markup=InlineKeyboardMarkup(kb)
+    text = (
+        f"👋 Chào mừng bạn đến với bot!\n\n"
+        f"👉 Chọn một tùy chọn bên dưới:"
     )
 
-async def free_item(update: Update, name):
-    await update.callback_query.answer()
-
-    await update.callback_query.message.edit_text(
-        f"🎉 Bạn nhận **{name}**!\n`DEMO-{name}-123456`",
-        parse_mode="Markdown",
+    await update.message.reply_text(
+        text,
+        reply_markup={"inline_keyboard": keyboard},
     )
 
-# ======================================
-# CALLBACK ROUTER
-# ======================================
-async def callbacks(update: Update, context):
+
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
+    cq = update.callback_query
+    await cq.answer()
 
-    if data == "buy": return await buy_menu(update, context)
-    if data == "free": return await free_menu(update, context)
-    if data == "back_main": return await start(update, context)
+    if data == "buy":
+        await cq.edit_message_text("Bạn muốn mua gói nào?")
+    elif data == "free":
+        await cq.edit_message_text("Đây là mục miễn phí!")
 
-    if data == "buy_go_main": return await show_main_package(update, context, "GO")
-    if data == "buy_plus_main": return await show_main_package(update, context, "PLUS")
-    if data == "buy_team_main": return await show_main_package(update, context, "TEAM")
 
-    if data == "free_go": return await free_item(update, "GO")
-    if data == "free_edu": return await free_item(update, "EDU")
-    if data == "free_plus": return await free_item(update, "PLUS")
+async def receive_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = update.effective_user
+        info = update.message.text
 
-# ======================================
-# NHẬN EMAIL / GHI CHÚ
-# ======================================
-async def receive_user_info(update: Update, context):
-    pkg = context.user_data.get("awaiting_info")
-    if not pkg:
-        return
+        order_data = {
+            "username": user.username,
+            "info": info,
+        }
 
-    user = update.effective_user
-    info = update.message.text
+        save_order_to_gist(user.id, order_data)
 
-    save_order_to_gist(
-        user.id, {"username": user.username, "package": pkg, "info": info}
-    )
+        msg = (
+            f"📥 ĐƠN MỚI\n"
+            f"👤 {user.username}\n"
+            f"🆔 {user.id}\n"
+            f"ℹ️ {info}\n"
+        )
+        await context.bot.send_message(ADMIN_CHAT_ID, msg)
+        await update.message.reply_text("✔ Đã ghi nhận thông tin!")
 
-    msg = (
-        f"🔥 **ĐƠN MỚI**\n"
-        f"👤 @{user.username} (ID: {user.id})\n"
-        f"📦 Gói: {pkg}\n"
-        f"📩 Info: {info}"
-    )
+    except Exception as e:
+        print("Order error:", e)
 
-    await context.bot.send_message(ADMIN_CHAT_ID, msg, parse_mode="Markdown")
-    await update.message.reply_text("✅ Đã ghi nhận!")
 
-    context.user_data["awaiting_info"] = None
+# ==============================
+#        FASTAPI + WEBHOOK
+# ==============================
 
-# ======================================
-# FASTAPI + WEBHOOK
-# ======================================
 app = FastAPI()
 
-telegram_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CallbackQueryHandler(callbacks))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_user_info))
+telegram_app.add_handler(MessageHandler(filters.TEXT, receive_user_info))
 
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"https://{os.getenv('CLOUD_RUN_SERVICE_URL')}{WEBHOOK_PATH}"
 
 @app.post(WEBHOOK_PATH)
-async def process_webhook(request: Request):
+async def telegram_webhook(req: Request):
     try:
-        data = await request.json()
+        data = await req.json()
         update = Update.de_json(data, telegram_app.bot)
         await telegram_app.process_update(update)
     except Exception as e:
         print("Webhook error:", e)
+
     return {"ok": True}
 
-# REMOVE AUTO SET_WEBHOOK – CAUSES 500 ON STARTUP
+
+@app.get("/")
+def home():
+    return {"status": "running", "webhook": WEBHOOK_URL}
