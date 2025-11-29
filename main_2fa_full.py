@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -53,14 +54,14 @@ PACKAGE_PRICES = {
     },
 }
 
-# Tên file trong Gist (bạn tạo sẵn)
-FREE_ACCOUNTS_FILE = "free_accounts.json"   # tk miễn phí
-SHOP_ACCOUNTS_FILE = "shop_accounts.json"   # tk bán (shop cấp)
+# Tên file trong Gist
+FREE_ACCOUNTS_FILE = "free_accounts.json"    # tk miễn phí
+SHOP_ACCOUNTS_FILE = "shop_accounts.json"    # tk bán (shop cấp)
+PENDING_ORDERS_FILE = "pending_orders.json"  # đơn chờ thanh toán
 
 # Lưu trạng thái user
-# {user_id: {"awaiting_info": "GO|PLUS|TEAM|EDU", "account_type": "shop|own"}}
+# {user_id: {"awaiting_info": "GO|PLUS|TEAM|EDU", "account_type": "shop|own", "payment_code": str}}
 USER_STATE = {}
-
 
 # ==============================
 #  GIST HELPERS
@@ -132,24 +133,49 @@ def get_and_consume_account(filename: str, package: str) -> str | None:
     return None
 
 
+def create_pending_order(payment_code: str, user_id: int, chat_id: int,
+                         username: str, package: str, account_type: str):
+    orders = load_gist_json(PENDING_ORDERS_FILE)
+    orders[payment_code] = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "username": username,
+        "package": package,
+        "account_type": account_type,
+        "status": "waiting_payment",
+        "info": "",
+        "created_at": int(time.time())
+    }
+    save_gist_json(PENDING_ORDERS_FILE, orders)
+
+
+def update_pending_order_info(payment_code: str, info: str) -> bool:
+    orders = load_gist_json(PENDING_ORDERS_FILE)
+    if payment_code not in orders:
+        return False
+    orders[payment_code]["info"] = info
+    save_gist_json(PENDING_ORDERS_FILE, orders)
+    return True
+
+
 # ==============================
 #  QR HELPER
 # ==============================
 def generate_qr(package_name: str, account_type: str, user_id: int, username: str | None):
     """
     QR theo gói + loại tài khoản.
-    addInfo = GO-shop-username
+    addInfo/payment_code = GO-shop-username
     """
     username_slug = username or f"id{user_id}"
 
     price = PACKAGE_PRICES[package_name][account_type]
-    addinfo = f"{package_name}-{account_type}-{username_slug}"
+    payment_code = f"{package_name}-{account_type}-{username_slug}"
 
     qr_url = (
         f"https://img.vietqr.io/image/{BANK_ID}-{ACCOUNT_NUMBER}-compact.png"
-        f"?amount={price}&addInfo={addinfo}"
+        f"?amount={price}&addInfo={payment_code}"
     )
-    return qr_url, price
+    return qr_url, price, payment_code
 
 
 # ==============================
@@ -227,14 +253,27 @@ def main_menu_keyboard():
     }
 
 
+def _package_price_range_label(pkg: str) -> str:
+    prices = PACKAGE_PRICES.get(pkg, {})
+    vals = list(prices.values())
+    if not vals:
+        return f"MAIN {pkg}"
+
+    min_p = min(vals)
+    max_p = max(vals)
+    if min_p == max_p:
+        return f"MAIN {pkg} ({min_p}đ)"
+    return f"MAIN {pkg} ({min_p}-{max_p}đ)"
+
+
 def buy_menu_keyboard():
-    # Thêm EDU vào menu mua gói
+    # Menu mua gói có kèm khoảng giá, ví dụ: MAIN GO (50000-70000đ)
     return {
         "inline_keyboard": [
-            [{"text": "MAIN GO", "callback_data": "buy_go_main"}],
-            [{"text": "MAIN PLUS", "callback_data": "buy_plus_main"}],
-            [{"text": "MAIN TEAM", "callback_data": "buy_team_main"}],
-            [{"text": "MAIN EDU", "callback_data": "buy_edu_main"}],
+            [{"text": _package_price_range_label("GO"), "callback_data": "buy_go_main"}],
+            [{"text": _package_price_range_label("PLUS"), "callback_data": "buy_plus_main"}],
+            [{"text": _package_price_range_label("TEAM"), "callback_data": "buy_team_main"}],
+            [{"text": _package_price_range_label("EDU"), "callback_data": "buy_edu_main"}],
             [{"text": "⬅️ Quay lại", "callback_data": "back_main"}],
         ]
     }
@@ -251,14 +290,14 @@ def buy_type_keyboard(package: str):
     if "shop" in prices:
         rows.append([
             {
-                "text": f"TK shop cấp - {prices['shop']:,}đ",
+                "text": f"TK shop cấp - {prices['shop']}đ",
                 "callback_data": f"buy_{package.lower()}_shop",
             }
         ])
     if "own" in prices:
         rows.append([
             {
-                "text": f"TK chính chủ - {prices['own']:,}đ",
+                "text": f"TK chính chủ - {prices['own']}đ",
                 "callback_data": f"buy_{package.lower()}_own",
             }
         ])
@@ -310,9 +349,9 @@ def send_buy_type_menu(chat_id, package: str, message_id=None):
     desc_lines = [f"📦 *GÓI {package}*"]
 
     if "shop" in prices:
-        desc_lines.append(f"- TK shop cấp: `{prices['shop']:,}đ`")
+        desc_lines.append(f"- TK shop cấp: `{prices['shop']}đ`")
     if "own" in prices:
-        desc_lines.append(f"- TK chính chủ: `{prices['own']:,}đ`")
+        desc_lines.append(f"- TK chính chủ: `{prices['own']}đ`")
 
     text = "\n".join(desc_lines)
 
@@ -365,18 +404,18 @@ def show_main_package(chat_id, user_id, username, package, account_type, message
     Gửi thông tin gói + QR, set trạng thái đợi user gửi email/ghi chú.
     account_type: 'shop' hoặc 'own'
     """
-    qr_url, amount = generate_qr(package, account_type, user_id, username)
+    qr_url, amount, payment_code = generate_qr(package, account_type, user_id, username)
 
     type_text = "tài khoản shop cấp" if account_type == "shop" else "tài khoản chính chủ"
 
     text = (
         f"📦 *GÓI MAIN {package} - {type_text}*\n\n"
-        "Để kích hoạt gói, vui lòng gửi cho bot:\n"
-        "1. Email tài khoản\n"
-        "2. Ghi chú (nếu có)\n\n"
-        f"💳 Số tiền cần thanh toán: `{amount:,}đ`\n"
-        "📌 *Quét mã QR bên dưới để thanh toán.*\n\n"
-        "⏳ Sau khi thanh toán, admin sẽ kiểm tra và hoàn tất xử lý."
+        "Để kích hoạt gói, vui lòng:\n"
+        "1️⃣ Quét mã QR bên dưới để thanh toán.\n"
+        "2️⃣ Gửi cho bot *email tài khoản + ghi chú* (nếu có).\n\n"
+        f"💳 Số tiền cần thanh toán: `{amount}đ`\n"
+        f"🧾 Nội dung chuyển khoản (addInfo): `{payment_code}`\n"
+        "⏳ Sau khi hệ thống xác nhận thanh toán, bot sẽ tự động cấp tài khoản / nâng cấp gói."
     )
 
     if message_id:
@@ -386,8 +425,15 @@ def show_main_package(chat_id, user_id, username, package, account_type, message
 
     tg_send_photo(chat_id, qr_url)
 
-    # lưu trạng thái (gói + loại tk)
-    USER_STATE[user_id] = {"awaiting_info": package, "account_type": account_type}
+    # lưu trạng thái (gói + loại tk + payment_code)
+    USER_STATE[user_id] = {
+        "awaiting_info": package,
+        "account_type": account_type,
+        "payment_code": payment_code,
+    }
+
+    # lưu đơn chờ thanh toán vào Gist
+    create_pending_order(payment_code, user_id, chat_id, username, package, account_type)
 
 
 # ==============================
@@ -504,68 +550,37 @@ async def telegram_webhook(request: Request):
         send_main_menu(chat_id)
         return PlainTextResponse("OK")
 
-    # Nếu user đang ở trạng thái "awaiting_info" -> xử lý như receive_user_info
+    # Nếu user đang ở trạng thái "awaiting_info" -> chỉ lưu info, chưa cấp tài khoản
     state = USER_STATE.get(user_id) or {}
     package = state.get("awaiting_info")
     account_type = state.get("account_type")
+    payment_code = state.get("payment_code")
 
-    if package:
+    if package and payment_code:
         info = text
 
-        # Nếu là tk shop cấp -> lấy tk từ Gist
-        shop_account = None
-        if account_type == "shop":
-            shop_account = get_and_consume_account(SHOP_ACCOUNTS_FILE, package)
+        # cập nhật info vào pending_orders.json
+        update_pending_order_info(payment_code, info)
 
-        # lưu order
-        save_order_to_gist(
-            user_id,
-            {
-                "username": username,
-                "package": package,
-                "account_type": account_type,
-                "info": info,
-                "account_given": shop_account,
-            },
-        )
-
-        # Gửi admin
+        # báo admin: khách đã gửi info, chờ thanh toán
         if ADMIN_CHAT_ID:
             admin_msg = (
-                f"🔥 *ĐƠN HÀNG MỚI*\n\n"
+                f"📝 *KHÁCH GỬI THÔNG TIN*\n\n"
                 f"👤 User: @{username} (ID: {user_id})\n"
                 f"📦 Gói: {package} ({account_type})\n"
+                f"💳 Mã thanh toán: `{payment_code}`\n"
                 f"📩 Thông tin:\n{info}\n\n"
+                f"⏳ Đơn đang chờ thanh toán."
             )
-            if shop_account:
-                admin_msg += f"🔐 TK shop cấp: `{shop_account}`"
             tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
 
-        # Báo khách
-        if account_type == "shop":
-            if shop_account:
-                user_msg = (
-                    "✅ Đã nhận thông tin & thanh toán của bạn.\n"
-                    "Đây là tài khoản shop cấp:\n\n"
-                    f"`{shop_account}`\n\n"
-                    "Nếu cần hỗ trợ, hãy liên hệ admin."
-                )
-            else:
-                user_msg = (
-                    "✅ Đã nhận thông tin của bạn.\n"
-                    "Hiện tại kho tài khoản shop đang được cập nhật.\n"
-                    "Admin sẽ cấp tài khoản cho bạn sớm nhất!"
-                )
-        else:  # chính chủ
-            user_msg = (
-                "✅ Đã nhận thông tin & thanh toán của bạn.\n"
-                "Admin sẽ thiết lập / nâng cấp gói cho tài khoản chính chủ của bạn."
-            )
+        # báo khách
+        tg_send_message(
+            chat_id,
+            "✅ Đã nhận thông tin của bạn.\n"
+            "Khi hệ thống xác nhận thanh toán, bot sẽ tự động xử lý và cấp tài khoản.",
+        )
 
-        tg_send_message(chat_id, user_msg, parse_mode="Markdown")
-
-        # reset state
-        USER_STATE[user_id] = {"awaiting_info": None, "account_type": None}
         return PlainTextResponse("OK")
 
     # Nếu không ở trạng thái mua gói, trả lời hướng dẫn chung
@@ -575,6 +590,114 @@ async def telegram_webhook(request: Request):
     )
 
     return PlainTextResponse("OK")
+
+
+@app.post("/payment_webhook")
+async def payment_webhook(request: Request):
+    """
+    Webhook để hệ thống thanh toán gọi vào khi giao dịch thành công.
+    Body JSON ví dụ:
+    {
+        "code": "GO-shop-username",
+        "amount": 50000
+    }
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid_json"}
+
+    payment_code = data.get("code")
+    amount = data.get("amount")
+
+    if not payment_code:
+        return {"ok": False, "error": "missing_code"}
+
+    orders = load_gist_json(PENDING_ORDERS_FILE)
+    order = orders.get(payment_code)
+    if not order:
+        return {"ok": False, "error": "order_not_found"}
+
+    package = order["package"]
+    account_type = order["account_type"]
+    user_id = order["user_id"]
+    chat_id = order["chat_id"]
+    username = order.get("username", "")
+    info = order.get("info", "")
+
+    expected_amount = PACKAGE_PRICES[package][account_type]
+    if amount is not None and amount != expected_amount:
+        # Bạn có thể đổi thành chỉ warning nếu muốn linh hoạt
+        return {"ok": False, "error": "amount_mismatch",
+                "expected": expected_amount, "got": amount}
+
+    shop_account = None
+    if account_type == "shop":
+        shop_account = get_and_consume_account(SHOP_ACCOUNTS_FILE, package)
+
+    # lưu đơn đã thanh toán
+    save_order_to_gist(
+        user_id,
+        {
+            "username": username,
+            "package": package,
+            "account_type": account_type,
+            "info": info,
+            "account_given": shop_account,
+            "payment_code": payment_code,
+            "amount": amount,
+            "status": "paid",
+            "paid_at": int(time.time()),
+        },
+    )
+
+    # xóa khỏi pending
+    try:
+        del orders[payment_code]
+        save_gist_json(PENDING_ORDERS_FILE, orders)
+    except Exception as e:
+        print("remove pending error:", e)
+
+    # gửi thông báo cho admin
+    if ADMIN_CHAT_ID:
+        admin_msg = (
+            f"💰 *THANH TOÁN THÀNH CÔNG*\n\n"
+            f"👤 User: @{username} (ID: {user_id})\n"
+            f"📦 Gói: {package} ({account_type})\n"
+            f"💳 Mã thanh toán: `{payment_code}`\n"
+            f"💵 Số tiền: `{amount}đ`\n"
+            f"📩 Thông tin:\n{info or '(không có)'}\n\n"
+        )
+        if shop_account:
+            admin_msg += f"🔐 TK shop cấp: `{shop_account}`"
+        else:
+            admin_msg += "⚠ Không lấy được tài khoản shop (hết hàng?)."
+
+        tg_send_message(ADMIN_CHAT_ID, admin_msg, parse_mode="Markdown")
+
+    # gửi thông báo cho khách
+    if account_type == "shop":
+        if shop_account:
+            user_msg = (
+                "✅ Hệ thống đã xác nhận *thanh toán thành công*.\n\n"
+                "Đây là tài khoản shop cấp của bạn:\n"
+                f"`{shop_account}`\n\n"
+                "Cảm ơn bạn đã sử dụng dịch vụ!"
+            )
+        else:
+            user_msg = (
+                "✅ Hệ thống đã xác nhận *thanh toán thành công*.\n"
+                "Hiện kho tài khoản đang được cập nhật, admin sẽ cấp tài khoản cho bạn sớm nhất."
+            )
+    else:  # chính chủ
+        user_msg = (
+            "✅ Hệ thống đã xác nhận *thanh toán thành công*.\n"
+            "Admin sẽ tiến hành nâng cấp / thiết lập gói cho tài khoản chính chủ của bạn."
+        )
+
+    tg_send_message(chat_id, user_msg, parse_mode="Markdown")
+
+    return {"ok": True}
 
 
 @app.get("/")
