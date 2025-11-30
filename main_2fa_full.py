@@ -51,7 +51,7 @@ PACKAGE_PRICES = {
 FREE_ACCOUNTS_FILE = "free_accounts.json"
 SHOP_ACCOUNTS_FILE = "shop_accounts.json"
 PENDING_ORDERS_FILE = "pending_orders.json"
-
+FREE_CLAIMS_FILE = "free_claims.json"
 # Trạng thái tạm theo user
 # { user_id: {"awaiting_info": package, "account_type": "shop|own", "payment_code": str} }
 USER_STATE = {}
@@ -97,6 +97,25 @@ def save_order_to_gist(user_id: int, data: dict) -> None:
     orders = load_gist_json("orders.json")
     orders[str(user_id)] = data
     save_gist_json("orders.json", orders)
+def has_claimed_free(user_id: int, package: str) -> bool:
+    """
+    Kiểm tra user đã nhận tài khoản miễn phí / khuyến mãi của loại này chưa.
+    package: tên gói - ví dụ: "GO", "EDU", "PLUS", "CANVA_EDU", ...
+    """
+    claims = load_gist_json(FREE_CLAIMS_FILE)
+    u = claims.get(str(user_id), {})
+    return u.get(package, False)
+
+
+def mark_claimed_free(user_id: int, package: str) -> None:
+    """
+    Đánh dấu user đã nhận 1 tài khoản miễn phí / khuyến mãi của loại này.
+    """
+    claims = load_gist_json(FREE_CLAIMS_FILE)
+    u = claims.get(str(user_id), {})
+    u[package] = True
+    claims[str(user_id)] = u
+    save_gist_json(FREE_CLAIMS_FILE, claims)
 
 
 def get_and_consume_account(filename: str, package: str) -> str | None:
@@ -381,9 +400,28 @@ def send_free_menu(chat_id, message_id=None):
         tg_send_message(chat_id, text, reply_markup=free_menu_keyboard())
 
 
-def send_free_item_from_gist(chat_id, package: str, message_id=None):
+def send_free_item_from_gist(chat_id, user_id, package: str, message_id=None):
+    """
+    Cấp tài khoản miễn phí / khuyến mãi cho user.
+    Mỗi user chỉ được nhận 1 lần cho mỗi loại package.
+    """
+    # Nếu user đã nhận loại này rồi → từ chối
+    if has_claimed_free(user_id, package):
+        text = (
+            f"❌ Bạn đã nhận tài khoản miễn phí / khuyến mãi loại {package} trước đó.\n"
+            "Mỗi loại tài khoản chỉ được nhận 1 lần cho mỗi người dùng."
+        )
+        if message_id:
+            tg_edit_message_text(chat_id, message_id, text)
+        else:
+            tg_send_message(chat_id, text)
+        return
+
+    # Lấy tài khoản từ kho
     account = get_and_consume_account(FREE_ACCOUNTS_FILE, package)
     if account:
+        # Đánh dấu đã nhận loại này
+        mark_claimed_free(user_id, package)
         text = (
             f"🎉 Đây là tài khoản miễn phí {package} của bạn:\n\n"
             f"{account}\n\n"
@@ -394,10 +432,12 @@ def send_free_item_from_gist(chat_id, package: str, message_id=None):
             f"❌ Hiện không còn tài khoản miễn phí {package}.\n"
             "Vui lòng thử lại sau hoặc chọn gói khác."
         )
+
     if message_id:
         tg_edit_message_text(chat_id, message_id, text)
     else:
         tg_send_message(chat_id, text)
+
 
 
 def show_main_package(chat_id, user_id, username, package, account_type, message_id=None):
@@ -702,10 +742,6 @@ async def telegram_webhook(request: Request):
                 f"Gói: {package} ({account_type})\n"
                 f"Mã thanh toán: {payment_code}\n\n"
                 "👉 Chọn trạng thái sau khi kiểm tra app ngân hàng:"
-                "- ✅ Hoàn thành\n"
-                "- ⚠️ Chuyển thiếu\n"
-                "- 💸 Chuyển thừa\n"
-                "- ❌ Không thấy tiền"
 
             )
             send_admin_message(
@@ -719,11 +755,14 @@ async def telegram_webhook(request: Request):
             )
 
         elif data == "free_go":
-            send_free_item_from_gist(chat_id, "GO", message_id)
+            send_free_item_from_gist(chat_id, user_id, "GO", message_id)
         elif data == "free_edu":
-            send_free_item_from_gist(chat_id, "EDU", message_id)
+            send_free_item_from_gist(chat_id, user_id, "EDU", message_id)
         elif data == "free_plus":
-            send_free_item_from_gist(chat_id, "PLUS", message_id)
+            send_free_item_from_gist(chat_id, user_id, "PLUS", message_id)
+        elif data == "free_canva_edu":
+            send_free_item_from_gist(chat_id, user_id, "CANVA_EDU", message_id)
+
                 # === Nút xử lý đơn cho ADMIN (Đủ tiền / Thiếu / Thừa / Không thấy tiền) ===
         elif data.startswith("adm_"):
             # chỉ cho admin bấm
