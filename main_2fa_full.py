@@ -225,15 +225,17 @@ def tg_edit_message_text(chat_id, message_id, text, reply_markup=None, parse_mod
         print("editMessageText error:", e)
 
 
-def send_admin_message(text: str):
+def send_admin_message(text: str, reply_markup=None):
     """
     Gửi tin nhắn cho admin.
     Không dùng Markdown để tránh lỗi parse (username có dấu _ , v.v.).
+    Có thể đính kèm inline keyboard qua reply_markup.
     """
     if not ADMIN_CHAT_ID:
         print("ADMIN_CHAT_ID not set, skip admin message:", text)
         return
-    tg_send_message(ADMIN_CHAT_ID, text, parse_mode=None)
+    tg_send_message(ADMIN_CHAT_ID, text, reply_markup=reply_markup, parse_mode=None)
+
 
 
 # ==============================
@@ -307,6 +309,24 @@ def payment_confirm_keyboard():
         ]
     }
 
+def admin_order_keyboard(payment_code: str):
+    """
+    Inline keyboard cho admin xử lý đơn theo payment_code.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Đủ tiền", "callback_data": f"adm_ok|{payment_code}"},
+            ],
+            [
+                {"text": "⚠️ Chuyển thiếu", "callback_data": f"adm_under|{payment_code}"},
+                {"text": "💸 Chuyển thừa", "callback_data": f"adm_over|{payment_code}"},
+            ],
+            [
+                {"text": "❌ Không thấy tiền", "callback_data": f"adm_none|{payment_code}"},
+            ],
+        ]
+    }
 
 def send_main_menu(chat_id):
     text = (
@@ -676,11 +696,21 @@ async def telegram_webhook(request: Request):
                 orders[payment_code]["status"] = "user_confirmed"
                 save_gist_json(PENDING_ORDERS_FILE, orders)
 
-            send_admin_message(
-                f"KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN\n"
+            admin_text = (
+                "KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN\n"
                 f"User: @{username} (ID {user_id})\n"
                 f"Gói: {package} ({account_type})\n"
-                f"Mã thanh toán: {payment_code}"
+                f"Mã thanh toán: {payment_code}\n\n"
+                "👉 Chọn trạng thái sau khi kiểm tra app ngân hàng:"
+                "- ✅ Hoàn thành\n"
+                "- ⚠️ Chuyển thiếu\n"
+                "- 💸 Chuyển thừa\n"
+                "- ❌ Không thấy tiền"
+
+            )
+            send_admin_message(
+                admin_text,
+                reply_markup=admin_order_keyboard(payment_code),
             )
 
             tg_send_message(
@@ -694,6 +724,84 @@ async def telegram_webhook(request: Request):
             send_free_item_from_gist(chat_id, "EDU", message_id)
         elif data == "free_plus":
             send_free_item_from_gist(chat_id, "PLUS", message_id)
+                # === Nút xử lý đơn cho ADMIN (Đủ tiền / Thiếu / Thừa / Không thấy tiền) ===
+        elif data.startswith("adm_"):
+            # chỉ cho admin bấm
+            if user_id != ADMIN_CHAT_ID:
+                tg_send_message(chat_id, "❌ Bạn không phải ADMIN, không thể thao tác đơn.")
+                return PlainTextResponse("OK")
+
+            try:
+                action, payment_code = data.split("|", 1)
+            except ValueError:
+                tg_send_message(chat_id, "Dữ liệu nút không hợp lệ.")
+                return PlainTextResponse("OK")
+
+            orders = load_gist_json(PENDING_ORDERS_FILE)
+            order = orders.get(payment_code)
+            if not order:
+                tg_send_message(chat_id, f"Không tìm thấy đơn {payment_code}.")
+                return PlainTextResponse("OK")
+
+            customer_chat_id = order["chat_id"]
+            customer_username = order.get("username") or ""
+            package = order["package"]
+            account_type = order["account_type"]
+
+            # ✅ Đủ tiền → xử lý như thanh toán đủ, cấp tài khoản / nâng cấp
+            if action == "adm_ok":
+                process_paid_order(order, payment_code, manual=True)
+                tg_send_message(
+                    chat_id,
+                    f"✅ Đã xác nhận ĐỦ TIỀN cho đơn {payment_code} (user @{customer_username}).",
+                )
+                return PlainTextResponse("OK")
+
+            # ⚠️ Chuyển thiếu → chỉ đánh dấu, nhắn khách chung chung (không cần số tiền)
+            if action == "adm_under":
+                order["status"] = "underpaid"
+                save_gist_json(PENDING_ORDERS_FILE, orders)
+
+                tg_send_message(
+                    customer_chat_id,
+                    "⚠ Admin xác nhận bạn CHUYỂN THIẾU so với số cần thanh toán.\n"
+                    "Vui lòng kiểm tra lại số tiền đã chuyển và liên hệ admin để được hỗ trợ.",
+                )
+                tg_send_message(
+                    chat_id,
+                    f"⚠ Đã đánh dấu đơn {payment_code} là CHUYỂN THIẾU.",
+                )
+                return PlainTextResponse("OK")
+
+            # 💸 Chuyển thừa → vẫn xử lý như thanh toán đủ + nhắn khách là chuyển thừa
+            if action == "adm_over":
+                process_paid_order(order, payment_code, manual=True)
+                tg_send_message(
+                    customer_chat_id,
+                    "ℹ Admin xác nhận bạn CHUYỂN THỪA so với số cần thanh toán.\n"
+                    "Gói vẫn được kích hoạt đầy đủ, cảm ơn bạn!",
+                )
+                tg_send_message(
+                    chat_id,
+                    f"💸 Đã đánh dấu đơn {payment_code} là CHUYỂN THỪA & đã xử lý như thanh toán đủ.",
+                )
+                return PlainTextResponse("OK")
+
+            # ❌ Không thấy tiền → đánh dấu no_payment, báo khách
+            if action == "adm_none":
+                order["status"] = "no_payment"
+                save_gist_json(PENDING_ORDERS_FILE, orders)
+
+                tg_send_message(
+                    customer_chat_id,
+                    "❌ Admin hiện *chưa thấy giao dịch* tương ứng với đơn của bạn.\n"
+                    "Nếu bạn chắc chắn đã chuyển, vui lòng chụp màn hình và liên hệ admin.",
+                )
+                tg_send_message(
+                    chat_id,
+                    f"❌ Đã đánh dấu đơn {payment_code} là KHÔNG THẤY TIỀN.",
+                )
+                return PlainTextResponse("OK")
 
         return PlainTextResponse("OK")
 
