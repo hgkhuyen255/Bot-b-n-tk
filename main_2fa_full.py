@@ -41,10 +41,10 @@ ACCOUNT_NUMBER = "0711000283429"   # THAY bằng STK của bạn
 
 # Giá mỗi gói
 PACKAGE_PRICES = {
-    "GO":   {"shop": 50000,  "own": 70000},
-    "PLUS": {"shop": 100000, "own": 130000},
-    "TEAM": {"shop": 200000, "own": 260000},
-    "EDU":  {"shop": 80000},  # EDU chỉ shop cấp
+    "GO":   {"shop": 350000,  "own": 400000},
+    "PLUS": {"shop": 100000, "own": 200000},
+    "TEAM": {"shop": 200000, "own": 240000},
+    "EDU":  {"shop": 500000},  # EDU chỉ shop cấp
 }
 
 # File trong Gist
@@ -263,8 +263,8 @@ def send_admin_message(text: str, reply_markup=None):
 def main_menu_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "🛒 Mua gói", "callback_data": "buy"}],
-            [{"text": "🎁 Gói miễn phí", "callback_data": "free"}],
+            [{"text": "🛒 Mua tài khoản", "callback_data": "buy"}],
+            [{"text": "🎁 Tài khoản dùng thử miễn phí", "callback_data": "free"}],
         ]
     }
 
@@ -284,10 +284,10 @@ def _package_price_range_label(pkg: str) -> str:
 def buy_menu_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": _package_price_range_label("GO"), "callback_data": "buy_go_main"}],
-            [{"text": _package_price_range_label("PLUS"), "callback_data": "buy_plus_main"}],
-            [{"text": _package_price_range_label("TEAM"), "callback_data": "buy_team_main"}],
-            [{"text": _package_price_range_label("EDU"), "callback_data": "buy_edu_main"}],
+            [{"text": _package_price_range_label("ChatGPT GO gói 1 năm"), "callback_data": "buy_go_main"}],
+            [{"text": _package_price_range_label("ChatGPT PLUS gói 1 tháng"), "callback_data": "buy_plus_main"}],
+            [{"text": _package_price_range_label("ChatGPT TEAM gói 1 tháng"), "callback_data": "buy_team_main"}],
+            [{"text": _package_price_range_label("ChatGPT EDU gói gần 2 năm"), "callback_data": "buy_edu_main"}],
             [{"text": "⬅️ Quay lại", "callback_data": "back_main"}],
         ]
     }
@@ -313,9 +313,9 @@ def buy_type_keyboard(package: str):
 def free_menu_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "Miễn phí GO", "callback_data": "free_go"}],
-            [{"text": "Miễn phí EDU", "callback_data": "free_edu"}],
-            [{"text": "Miễn phí PLUS", "callback_data": "free_plus"}],
+            [{"text": "Miễn phí ChatgptGO", "callback_data": "free_go"}],
+            [{"text": "Miễn phí ChatgptEDU", "callback_data": "free_edu"}],
+            [{"text": "Miễn phí ChatgptPLUS", "callback_data": "free_plus"}],
             [{"text": "Miễn phí Canva EDU", "callback_data": "free_canva_edu"}],   # ← THÊM
             [{"text": "⬅️ Quay lại", "callback_data": "back_main"}],
         ]
@@ -352,11 +352,13 @@ def admin_order_keyboard(payment_code: str):
 
 def send_main_menu(chat_id):
     text = (
-        "🎉 Chào mừng bạn đến với Bot!\n\n"
-        "Bạn có thể:\n"
-        "- Mua gói (GO / PLUS / TEAM / EDU)\n"
+        "🎉 Chào mừng bạn đến với Trạm tài khoản số\n\n"
+        "TK - Shop zalo: 0849289899\n"
+        "- Mua gói (ChatgptGO / ChatgptPLUS / ChatgtTEAM / ChatgptEDU)\n"
         "- Nhận gói miễn phí\n"
-        "Bot mẫu phục vụ học tập."
+        "- Quy trình tự động, thao tác đơn giản.\n"
+        "Chọn nút bên dưới để sử dụng các chức năng\n"
+        "Nếu gặp vấn đề trong quá trình mua gói và sử dụng có thể liên hệ trực tiếp admin"
     )
     tg_send_message(chat_id, text, reply_markup=main_menu_keyboard())
 
