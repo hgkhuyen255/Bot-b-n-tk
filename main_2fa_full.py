@@ -313,10 +313,10 @@ def buy_type_keyboard(package: str):
 def free_menu_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "Miễn phí ChatgptGO", "callback_data": "free_go"}],
-            [{"text": "Miễn phí ChatgptEDU", "callback_data": "free_edu"}],
-            [{"text": "Miễn phí ChatgptPLUS", "callback_data": "free_plus"}],
-            [{"text": "Miễn phí Canva EDU", "callback_data": "free_canva_edu"}],   # ← THÊM
+            [{"text": "Free ChatgptGO", "callback_data": "free_go"}],
+            [{"text": "Free ChatgptEDU", "callback_data": "free_edu"}],
+            [{"text": "Free ChatgptPLUS", "callback_data": "free_plus"}],
+            [{"text": "Free Canva EDU", "callback_data": "free_canva_edu"}],   # ← THÊM
             [{"text": "⬅️ Quay lại", "callback_data": "back_main"}],
         ]
     }
@@ -365,11 +365,12 @@ def send_main_menu(chat_id):
 
 def send_buy_menu(chat_id, message_id=None):
     text = (
-        "🛒 Chọn gói MAIN bạn muốn mua:\n\n"
+        "🛒 Chọn gói chatgpt bạn muốn mua:\n\n"
         "Mỗi gói sẽ có 2 lựa chọn:\n"
         "- Tài khoản shop cấp\n"
         "- Tài khoản chính chủ (nếu có)\n\n"
-        "Bấm vào gói để xem chi tiết giá."
+        "Bấm vào gói để xem chi tiết giá.\n"
+        "Để mua nhanh hơn vui lòng liên hệ admin hoặc zalo cho shop."
     )
     if message_id:
         tg_edit_message_text(chat_id, message_id, text, reply_markup=buy_menu_keyboard())
@@ -396,7 +397,8 @@ def send_free_menu(chat_id, message_id=None):
     text = (
         "🎁 Chọn gói miễn phí:\n\n"
         "Tài khoản miễn phí được cấp tự động từ kho riêng,\n"
-        "không ảnh hưởng đến tài khoản shop bán."
+        "không ảnh hưởng đến tài khoản shop bán.\n"
+        "Có giới hạn nhận tài khoản miễn phí."
     )
     if message_id:
         tg_edit_message_text(chat_id, message_id, text,
