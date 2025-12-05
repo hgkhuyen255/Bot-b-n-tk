@@ -41,9 +41,9 @@ ACCOUNT_NUMBER = "0711000283429"   # THAY bằng STK của bạn
 
 # Giá mỗi gói
 PACKAGE_PRICES = {
-    "GO":   {"shop": 350000,  "own": 400000},
-    "PLUS": {"shop": 100000, "own": 200000},
-    "TEAM": {"shop": 200000, "own": 240000},
+    "GO":   {"shop": 300000,  "own": 300000},
+    "PLUS": {"shop": 50000, "own": 100000},
+    "TEAM": {"shop": 180000, "own": 200000},
     "EDU":  {"shop": 500000},  # EDU chỉ shop cấp
 }
 
