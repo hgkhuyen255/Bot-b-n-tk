@@ -354,8 +354,8 @@ def send_main_menu(chat_id):
     text = (
         "🎉 Chào mừng bạn đến với Trạm tài khoản số\n\n"
         "TK - Shop zalo: 0849289899\n"
-        "- Mua gói (ChatgptGO / ChatgptPLUS / ChatgtTEAM / ChatgptEDU)\n"
-        "- Nhận gói miễn phí\n"
+        "- Mua tài khoản (ChatgptGO / ChatgptPLUS / ChatgtTEAM / ChatgptEDU)\n"
+        "- Nhận tài khoản miễn phí\n"
         "- Quy trình tự động, thao tác đơn giản.\n"
         "Chọn nút bên dưới để sử dụng các chức năng\n"
         "Nếu gặp vấn đề trong quá trình mua gói và sử dụng có thể liên hệ trực tiếp admin"
