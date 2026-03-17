@@ -1009,14 +1009,15 @@ def home_text() -> str:
     settings = get_settings()
     return (
         f"🎉 Chào mừng đến với {settings.get('shop_name', 'Trạm tài khoản số')}\n\n"
-        "Bot hỗ trợ:\n"
+        "Bot hoạt động 24h:\n"
+        "Cung cấp tài khoản số uy tín:\n"
         "- Mua tài khoản dùng chung / cấp riêng\n"
-        "- Lưu thông tin khách hàng\n"
-        "- Kiểm tra hạn sử dụng\n"
-        "- Chỉ cấp mã 2FA cho khách còn hạn\n\n"
+        "⚡ Tự động cấp – quản lý – gia hạn\n"
+        "🔐 Lấy mã 2FA nhanh chóng dễ dàng\n\n"
         "📞 Hỗ trợ:\n"
         "Telegram: @tkminer\n"
-        "Zalo: 0326805803"
+        "Zalo: 0326805803\n\n"
+        "👉 Chọn chức năng bên dưới để bắt đầu."
     )
 
 
