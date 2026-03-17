@@ -55,21 +55,21 @@ CATALOG = {
         "platform": "ChatGPT",
         "type": "shared",
         "duration_days": 30,
-        "price": 59000,
+        "price": 69000,
     },
     "chatgpt_shared_3": {
         "name": "ChatGPT chung 3",
         "platform": "ChatGPT",
         "type": "shared",
         "duration_days": 30,
-        "price": 89000,
+        "price": 119000,
     },
     "chatgpt_shared_2": {
         "name": "ChatGPT chung 2",
         "platform": "ChatGPT",
         "type": "shared",
         "duration_days": 30,
-        "price": 129000,
+        "price": 149000,
     },
     "chatgpt_private": {
         "name": "ChatGPT cấp riêng",
@@ -90,7 +90,7 @@ CATALOG = {
         "platform": "Grok",
         "type": "private",
         "duration_days": 30,
-        "price": 199000,
+        "price": 299000,
     },
     "gemini_shared": {
         "name": "Gemini chung",
