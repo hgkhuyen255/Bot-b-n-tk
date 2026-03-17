@@ -576,7 +576,7 @@ def main_menu_keyboard():
             [{"text": "🛒 Mua tài khoản", "callback_data": "menu_buy"}],
             [{"text": "🔐 Lấy mã 2FA", "callback_data": "menu_2fa"}],
             [{"text": "📦 Tài khoản của tôi", "callback_data": "menu_my"}],
-            [{"text": "📞 Liên hệ admin", "callback_data": "menu_support"}],
+        
         ]
     }
 
@@ -669,7 +669,9 @@ def home_text() -> str:
         "- Lưu thông tin khách hàng\n"
         "- Kiểm tra hạn sử dụng\n"
         "- Chỉ cấp mã 2FA cho khách còn hạn\n\n"
-        f"{settings.get('support', 'Liên hệ admin để được hỗ trợ.')}"
+        "📞 Hỗ trợ:\n"
+        "Telegram: @tkminer\n"
+        "Zalo: 0326805803"
     )
 
 
