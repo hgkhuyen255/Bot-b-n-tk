@@ -290,6 +290,20 @@ def save_inventory(inventory: Dict[str, Any]):
     save_gist_json(INVENTORY_FILE, inventory)
 
 
+def get_stock_count(product_code: str) -> int:
+    inventory = get_inventory()
+    return len(inventory.get(product_code, []))
+
+
+def is_in_stock(product_code: str) -> bool:
+    return get_stock_count(product_code) > 0
+
+
+def stock_label(product_code: str) -> str:
+    count = get_stock_count(product_code)
+    return f"{count}📦️" if count > 0 else "Hết hàng"
+
+
 def get_customers() -> Dict[str, Any]:
     return load_gist_json(CUSTOMERS_FILE, {})
 
@@ -562,7 +576,7 @@ def main_menu_keyboard():
             [{"text": "🛒 Mua tài khoản", "callback_data": "menu_buy"}],
             [{"text": "🔐 Lấy mã 2FA", "callback_data": "menu_2fa"}],
             [{"text": "📦 Tài khoản của tôi", "callback_data": "menu_my"}],
-            [{"text": "📞 Liên hệ admin", "callback_data": "menu_support"}],
+        
         ]
     }
 
@@ -580,7 +594,7 @@ def product_menu_keyboard(platform: str):
     for code in PLATFORM_TREE.get(platform, []):
         item = CATALOG[code]
         rows.append([{
-            "text": f"{item['name']} - từ {format_money(get_product_price(code, 1))}/tháng",
+            "text": f"{item['name']} - từ {format_money(get_product_price(code, 1))}/tháng | {stock_label(code)}",
             "callback_data": f"buy|{code}",
         }])
     rows.append([{"text": "⬅️ Chọn nền tảng khác", "callback_data": "menu_buy"}])
@@ -589,13 +603,10 @@ def product_menu_keyboard(platform: str):
 
 def term_menu_keyboard(product_code: str):
     rows = []
+    stock = stock_label(product_code)
     for months in TERM_OPTIONS:
         total_price = get_product_price(product_code, months)
-        discount = int(get_term_discount(months) * 100)
-        if discount > 0:
-            label = f"{term_label(months)} | {format_money(total_price)} | giảm {discount}%"
-        else:
-            label = f"{term_label(months)} | {format_money(total_price)}"
+        label = f"{term_label(months)} | {format_money(total_price)} | {stock}"
         rows.append([{
             "text": label,
             "callback_data": f"term|{product_code}|{months}",
@@ -658,19 +669,24 @@ def home_text() -> str:
         "- Lưu thông tin khách hàng\n"
         "- Kiểm tra hạn sử dụng\n"
         "- Chỉ cấp mã 2FA cho khách còn hạn\n\n"
-        f"{settings.get('support', 'Liên hệ admin để được hỗ trợ.')}"
+        "📞 Hỗ trợ:\n"
+        "Telegram: @tkminer\n"
+        "Zalo: 0326805803"
     )
 
 
-def product_detail_text(product_code: str) -> str:
+def product_detail_text(product_code: str, months: int = 1) -> str:
     item = CATALOG[product_code]
     type_vi = "Tài khoản dùng chung" if item["type"] == "shared" else "Tài khoản cấp riêng"
+    total_price = get_product_price(product_code, months)
+    duration_days = get_duration_days_for_months(months)
     return (
         f"📦 {item['name']}\n\n"
         f"Nền tảng: {item['platform']}\n"
         f"Loại: {type_vi}\n"
-        f"Giá: {item['price']:,}đ".replace(",", ".") + "\n"
-        f"Thời hạn: {item['duration_days']} ngày\n\n"
+        f"Thời hạn đang chọn: {term_label(months)} ({duration_days} ngày)\n"
+        f"Giá thanh toán: {format_money(total_price)}\n"
+        f"Kho hiện tại: {stock_label(product_code)}\n\n"
         "Sau khi thanh toán và được xác nhận, bot sẽ cấp tài khoản hoặc ghi nhận để admin cấp riêng.\n"
         "Mã 2FA chỉ lấy được khi gói còn hạn."
     )
@@ -804,6 +820,7 @@ def admin_help() -> str:
         "/orders\n"
         "/inventory\n"
         "/products\n"
+        "/checkstock [product_code]\n"
         "/remindnow"
     )
 
@@ -823,7 +840,21 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
     if cmd == "/products":
         lines = ["📋 Product code hiện có:"]
         for code, item in CATALOG.items():
-            lines.append(f"- {code}: {item['name']} | từ {format_money(item['price'])}/tháng")
+            lines.append(f"- {code}: {item['name']} | từ {format_money(item['price'])}/tháng | {stock_label(code)}")
+        tg_send_message(chat_id, "\n".join(lines))
+        return
+
+    if cmd == "/checkstock":
+        if len(parts) >= 2:
+            code = parts[1]
+            if code not in CATALOG:
+                tg_send_message(chat_id, "❌ product_code không tồn tại.")
+                return
+            tg_send_message(chat_id, f"📦 {code} | {CATALOG[code]['name']} | Còn {get_stock_count(code)} tài khoản")
+            return
+        lines = ["📦 Kiểm tra kho hiện tại:"]
+        for code, item in CATALOG.items():
+            lines.append(f"- {code}: {item['name']} | {stock_label(code)}")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -839,7 +870,7 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         inventory = get_inventory()
         lines = ["📦 Tồn kho:"]
         for code, rows in inventory.items():
-            lines.append(f"- {code}: {len(rows)} tài khoản")
+            lines.append(f"- {code}: {len(rows)} tài khoản | {stock_label(code)}")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -890,7 +921,7 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         account_key = parts[4] if len(parts) >= 5 else ""
         note = " ".join(parts[5:]) if len(parts) >= 6 else ""
         add_inventory_account(product_code, username, password, account_key, note)
-        tg_send_message(chat_id, f"✅ Đã thêm kho cho {product_code}.")
+        tg_send_message(chat_id, f"✅ Đã thêm kho cho {product_code}. Tồn kho hiện tại: {get_stock_count(product_code)}")
         return
 
     if cmd == "/grant" and len(parts) >= 6:
@@ -997,6 +1028,9 @@ def handle_callback(cq: Dict[str, Any]):
     if data.startswith("pay|"):
         _, code, months_raw = data.split("|", 2)
         months = int(months_raw)
+        if CATALOG[code]["type"] == "shared" and not is_in_stock(code):
+            tg_send_message(chat_id, "⚠️ Sản phẩm này hiện đã hết kho, vui lòng chọn gói khác hoặc liên hệ admin.")
+            return
         order = create_pending_order(user_id, chat_id, username, full_name, code, months)
         qr_url = generate_qr(order["price"], order["order_code"])
         caption = (
@@ -1100,7 +1134,7 @@ def handle_text_message(message: Dict[str, Any]):
     save_user(user_id, username, full_name)
 
     if text.startswith("/"):
-        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products", "/remindnow")):
+        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products", "/checkstock", "/remindnow")):
             handle_admin_command(chat_id, user_id, text)
             return
         if text.startswith("/start"):
