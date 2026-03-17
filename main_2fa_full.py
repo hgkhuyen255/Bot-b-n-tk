@@ -19,6 +19,7 @@ CLOUD_RUN_URL = os.getenv("CLOUD_RUN_SERVICE_URL", "")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{CLOUD_RUN_URL}{WEBHOOK_PATH}" if CLOUD_RUN_URL else WEBHOOK_PATH
 TG_BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 
 _admin_env = os.getenv("ADMIN_CHAT_ID", "")
 try:
@@ -43,6 +44,7 @@ CUSTOMERS_FILE = "customers.json"
 ORDERS_FILE = "orders.json"
 PENDING_ORDERS_FILE = "pending_orders.json"
 REMINDER_LOG_FILE = "reminder_log.json"
+FREE_REQUESTS_FILE = "free_requests.json"
 
 # ============================================================
 # CATALOG / DEFAULT CONFIG
@@ -128,6 +130,30 @@ TERM_DISCOUNTS = {
     12: 0.18,
 }
 
+FREE_GIFTS = {
+    "chatgpt_free": {
+        "name": "ChatGPT Free",
+        "points_cost": 5,
+        "kind": "manual",
+    },
+    "grok_free": {
+        "name": "Grok Free",
+        "points_cost": 5,
+        "kind": "manual",
+    },
+    "capcut_free": {
+        "name": "CapCut Free",
+        "points_cost": 3,
+        "kind": "manual",
+    },
+    "canva_edu_free": {
+        "name": "Canva Edu miễn phí",
+        "points_cost": 0,
+        "kind": "email_admin",
+        "newbie_gift": True,
+    },
+}
+
 USER_STATE: Dict[int, Dict[str, Any]] = {}
 
 app = FastAPI()
@@ -205,10 +231,228 @@ def ensure_bootstrap_files() -> None:
         (ORDERS_FILE, {}),
         (PENDING_ORDERS_FILE, {}),
         (REMINDER_LOG_FILE, {}),
+        (FREE_REQUESTS_FILE, {}),
     ]:
         if load_gist_json(filename, None) is None:
             save_gist_json(filename, default)
 
+
+# ============================================================
+# USER / REFERRAL / FREE HELPERS
+# ============================================================
+def get_users() -> Dict[str, Any]:
+    return load_gist_json(USERS_FILE, {})
+
+
+def save_users(data: Dict[str, Any]):
+    save_gist_json(USERS_FILE, data)
+
+
+def default_user_record(user_id: int, username: str = "", full_name: str = "") -> Dict[str, Any]:
+    return {
+        "username": username,
+        "full_name": full_name,
+        "updated_at": now_ts(),
+        "joined_at": now_ts(),
+        "points": 0,
+        "used_points": 0,
+        "total_invited": 0,
+        "invited_user_ids": [],
+        "referral_code": f"ref{user_id}",
+        "referred_by": None,
+        "canva_newbie_claimed": False,
+    }
+
+
+def ensure_user_record(user_id: int, username: str = "", full_name: str = "") -> Dict[str, Any]:
+    users = get_users()
+    key = str(user_id)
+    record = users.get(key) or default_user_record(user_id, username, full_name)
+    record.setdefault("points", 0)
+    record.setdefault("used_points", 0)
+    record.setdefault("total_invited", 0)
+    record.setdefault("invited_user_ids", [])
+    record.setdefault("referral_code", f"ref{user_id}")
+    record.setdefault("referred_by", None)
+    record.setdefault("canva_newbie_claimed", False)
+    record["username"] = username or record.get("username", "")
+    record["full_name"] = full_name or record.get("full_name", "")
+    record["updated_at"] = now_ts()
+    record.setdefault("joined_at", now_ts())
+    users[key] = record
+    save_users(users)
+    return record
+
+
+def update_user_points(user_id: int, delta_points: int = 0, delta_used_points: int = 0) -> Dict[str, Any]:
+    users = get_users()
+    key = str(user_id)
+    record = users.get(key) or default_user_record(user_id)
+    record["points"] = max(0, int(record.get("points", 0)) + int(delta_points))
+    record["used_points"] = max(0, int(record.get("used_points", 0)) + int(delta_used_points))
+    record["updated_at"] = now_ts()
+    users[key] = record
+    save_users(users)
+    return record
+
+
+def get_user_record(user_id: int) -> Dict[str, Any]:
+    users = get_users()
+    return users.get(str(user_id)) or default_user_record(user_id)
+
+
+def find_user_by_referral_code(ref_code: str) -> Optional[int]:
+    for uid, info in get_users().items():
+        if info.get("referral_code") == ref_code:
+            try:
+                return int(uid)
+            except Exception:
+                return None
+    return None
+
+
+def apply_referral_if_needed(user_id: int, username: str, full_name: str, ref_code: str) -> bool:
+    users = get_users()
+    key = str(user_id)
+    record = users.get(key) or default_user_record(user_id, username, full_name)
+    if record.get("referred_by"):
+        users[key] = record
+        save_users(users)
+        return False
+
+    inviter_id = find_user_by_referral_code(ref_code)
+    if not inviter_id or inviter_id == user_id:
+        users[key] = record
+        save_users(users)
+        return False
+
+    inviter_key = str(inviter_id)
+    inviter = users.get(inviter_key) or default_user_record(inviter_id)
+    invited_ids = inviter.get("invited_user_ids", [])
+    if user_id in invited_ids:
+        record["referred_by"] = inviter_id
+        users[key] = record
+        users[inviter_key] = inviter
+        save_users(users)
+        return False
+
+    invited_ids.append(user_id)
+    inviter["invited_user_ids"] = invited_ids
+    inviter["total_invited"] = len(invited_ids)
+    inviter["points"] = int(inviter.get("points", 0)) + 1
+    inviter["updated_at"] = now_ts()
+
+    record["referred_by"] = inviter_id
+    record["updated_at"] = now_ts()
+
+    users[key] = record
+    users[inviter_key] = inviter
+    save_users(users)
+
+    tg_send_message(inviter_id,
+                    "🎉 Bạn vừa mời thành công 1 người mới.\n"
+                    f"+1 điểm đã được cộng.\n"
+                    f"Điểm hiện có: {inviter['points']}")
+    return True
+
+
+def build_referral_link(user_id: int) -> str:
+    user = get_user_record(user_id)
+    code = user.get("referral_code", f"ref{user_id}")
+    if BOT_USERNAME:
+        return f"https://t.me/{BOT_USERNAME}?start={code}"
+    return code
+
+
+def get_free_requests() -> Dict[str, Any]:
+    return load_gist_json(FREE_REQUESTS_FILE, {})
+
+
+def save_free_requests(data: Dict[str, Any]):
+    save_gist_json(FREE_REQUESTS_FILE, data)
+
+
+def make_free_request_code(gift_code: str, user_id: int) -> str:
+    return f"free-{gift_code}-{user_id}-{int(time.time())}"
+
+
+def has_pending_free_request(user_id: int, gift_code: str) -> bool:
+    for req in get_free_requests().values():
+        if int(req.get("user_id", 0)) == int(user_id) and req.get("gift_code") == gift_code and req.get("status") in {"waiting_email", "pending_admin"}:
+            return True
+    return False
+
+
+def create_free_request(user_id: int, username: str, full_name: str, gift_code: str, email: str = "") -> Dict[str, Any]:
+    requests_data = get_free_requests()
+    req_code = make_free_request_code(gift_code, user_id)
+    gift = FREE_GIFTS[gift_code]
+    requests_data[req_code] = {
+        "request_code": req_code,
+        "gift_code": gift_code,
+        "gift_name": gift["name"],
+        "user_id": user_id,
+        "username": username,
+        "full_name": full_name,
+        "email": email,
+        "points_cost": int(gift.get("points_cost", 0)),
+        "status": "pending_admin" if email or gift.get("kind") != "email_admin" else "waiting_email",
+        "created_at": now_ts(),
+    }
+    save_free_requests(requests_data)
+    return requests_data[req_code]
+
+
+def mark_canva_claimed(user_id: int):
+    users = get_users()
+    key = str(user_id)
+    record = users.get(key) or default_user_record(user_id)
+    record["canva_newbie_claimed"] = True
+    record["updated_at"] = now_ts()
+    users[key] = record
+    save_users(users)
+
+
+def refund_points_for_request(req: Dict[str, Any]):
+    cost = int(req.get("points_cost", 0) or 0)
+    if cost > 0:
+        update_user_points(int(req["user_id"]), delta_points=cost, delta_used_points=-cost)
+
+
+def free_request_admin_keyboard(request_code: str):
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Add thành công", "callback_data": f"free_ok|{request_code}"}],
+            [{"text": "⏳ Tạm hết", "callback_data": f"free_out|{request_code}"}],
+        ]
+    }
+
+
+def build_free_admin_text(req: Dict[str, Any]) -> str:
+    user_tag = f"@{req.get('username','')}" if req.get("username") else req.get("full_name", "")
+    email_line = f"\n- Email: {req.get('email')}" if req.get("email") else ""
+    return (
+        "🎁 Yêu cầu quà free mới\n"
+        f"- Quà: {req.get('gift_name')}\n"
+        f"- User: {user_tag} | ID: {req.get('user_id')}\n"
+        f"- Điểm trừ: {req.get('points_cost', 0)}{email_line}\n"
+        f"- Mã request: {req.get('request_code')}"
+    )
+
+
+def submit_free_request_to_admin(req: Dict[str, Any]):
+    send_admin_message(build_free_admin_text(req), reply_markup=free_request_admin_keyboard(req["request_code"]))
+
+
+def account_summary_text(user_id: int) -> str:
+    user = get_user_record(user_id)
+    return (
+        "👤 Tài khoản của tôi\n\n"
+        f"Điểm hiện có: {int(user.get('points', 0))}\n"
+        f"Tổng người đã mời: {int(user.get('total_invited', 0))}\n"
+        f"Điểm đã dùng đổi quà: {int(user.get('used_points', 0))}\n"
+        f"Link / mã mời: {build_referral_link(user_id)}"
+    )
 
 # ============================================================
 # TELEGRAM HELPERS
@@ -262,14 +506,7 @@ def now_ts() -> int:
 
 
 def save_user(user_id: int, username: str, full_name: str):
-    users = load_gist_json(USERS_FILE, {})
-    users[str(user_id)] = {
-        "username": username,
-        "full_name": full_name,
-        "updated_at": now_ts(),
-        "joined_at": users.get(str(user_id), {}).get("joined_at", now_ts()),
-    }
-    save_gist_json(USERS_FILE, users)
+    ensure_user_record(user_id, username, full_name)
 
 
 def get_settings() -> Dict[str, Any]:
@@ -574,11 +811,28 @@ def main_menu_keyboard():
     return {
         "inline_keyboard": [
             [{"text": "🛒 Mua tài khoản", "callback_data": "menu_buy"}],
+            [{"text": "🎁 TK Free", "callback_data": "menu_free"}],
             [{"text": "🔐 Lấy mã 2FA", "callback_data": "menu_2fa"}],
             [{"text": "📦 Tài khoản của tôi", "callback_data": "menu_my"}],
-        
         ]
     }
+
+
+def free_menu_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "ChatGPT Free · 5 điểm", "callback_data": "free_gift|chatgpt_free"}],
+            [{"text": "Grok Free · 5 điểm", "callback_data": "free_gift|grok_free"}],
+            [{"text": "Canva Edu miễn phí · quà tân thủ", "callback_data": "free_gift|canva_edu_free"}],
+            [{"text": "CapCut Free · 3 điểm", "callback_data": "free_gift|capcut_free"}],
+            [{"text": "👥 Mời bạn bè / điểm", "callback_data": "menu_referral"}],
+            [{"text": "⬅️ Về menu", "callback_data": "home"}],
+        ]
+    }
+
+
+def free_back_keyboard():
+    return {"inline_keyboard": [[{"text": "⬅️ Về TK Free", "callback_data": "menu_free"}]]}
 
 
 def platform_menu_keyboard():
@@ -712,6 +966,54 @@ def my_products_text(user_id: int) -> str:
         )
     return "\n".join(lines)
 
+
+def free_menu_text(user_id: int) -> str:
+    user = get_user_record(user_id)
+    return (
+        "🎁 TK Free\n\n"
+        "Quà hiện có:\n"
+        "- ChatGPT Free: đổi 5 điểm\n"
+        "- Grok Free: đổi 5 điểm\n"
+        "- CapCut Free: đổi 3 điểm\n"
+        "- Canva Edu miễn phí: quà tân thủ, không trừ điểm\n\n"
+        "Mỗi user mới mời thành công = +1 điểm.\n"
+        "Khi đổi quà bằng điểm, hệ thống sẽ trừ điểm ngay khi gửi yêu cầu.\n\n"
+        f"Điểm hiện có: {int(user.get('points', 0))}"
+    )
+
+
+def referral_menu_text(user_id: int) -> str:
+    return (
+        "👥 Hệ thống mời bạn bè / điểm\n\n"
+        "- Mỗi user mới mời thành công = +1 điểm\n"
+        "- ChatGPT Free / Grok Free: 5 điểm\n"
+        "- CapCut Free: 3 điểm\n"
+        "- Canva Edu Free: quà tân thủ, không trừ điểm\n\n"
+        f"{account_summary_text(user_id)}"
+    )
+
+
+def free_gift_detail_text(user_id: int, gift_code: str) -> str:
+    gift = FREE_GIFTS[gift_code]
+    user = get_user_record(user_id)
+    cost = int(gift.get("points_cost", 0))
+    extra = "Quà tân thủ, không trừ điểm." if gift_code == "canva_edu_free" else f"Điểm cần đổi: {cost}."
+    note = "Bấm nhận rồi nhập email để admin add Canva Edu." if gift_code == "canva_edu_free" else "Bấm nhận để gửi yêu cầu xử lý quà free cho admin."
+    return (
+        f"🎁 {gift['name']}\n\n"
+        f"{extra}\n"
+        f"Điểm hiện có: {int(user.get('points', 0))}\n\n"
+        f"{note}"
+    )
+
+
+def free_gift_confirm_keyboard(gift_code: str):
+    return {
+        "inline_keyboard": [
+            [{"text": "🎁 Nhận quà", "callback_data": f"free_claim|{gift_code}"}],
+            [{"text": "⬅️ Về TK Free", "callback_data": "menu_free"}],
+        ]
+    }
 
 # ============================================================
 # ORDER PROCESSING
@@ -885,6 +1187,18 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         tg_send_message(chat_id, "\n".join(lines))
         return
 
+    if cmd == "/free_requests":
+        data = get_free_requests()
+        rows = [r for r in data.values() if r.get("status") in {"waiting_email", "pending_admin"}]
+        if not rows:
+            tg_send_message(chat_id, "Không có yêu cầu quà free đang chờ.")
+            return
+        lines = ["🎁 Yêu cầu free đang chờ:"]
+        for r in rows[-20:]:
+            lines.append(f"- {r['request_code']} | {r['gift_name']} | {r.get('username','')} | {r.get('email','không có email')} | {r['status']}")
+        tg_send_message(chat_id, "\n".join(lines))
+        return
+
     if cmd == "/addsecret" and len(parts) >= 3:
         account_key, secret = parts[1], parts[2]
         set_secret(account_key, secret)
@@ -1001,11 +1315,51 @@ def handle_callback(cq: Dict[str, Any]):
     if data == "menu_buy":
         tg_edit_message(chat_id, message_id, "🛒 Chọn nền tảng cần mua:", reply_markup=platform_menu_keyboard())
         return
+    if data == "menu_free":
+        tg_edit_message(chat_id, message_id, free_menu_text(user_id), reply_markup=free_menu_keyboard())
+        return
+    if data == "menu_referral":
+        tg_edit_message(chat_id, message_id, referral_menu_text(user_id), reply_markup=free_back_keyboard())
+        return
     if data == "menu_support":
         tg_edit_message(chat_id, message_id, get_settings().get("support", "Liên hệ admin để được hỗ trợ."), reply_markup=main_menu_keyboard())
         return
     if data == "menu_my":
         tg_edit_message(chat_id, message_id, my_products_text(user_id), reply_markup=main_menu_keyboard())
+        return
+    if data.startswith("free_gift|"):
+        gift_code = data.split("|", 1)[1]
+        if gift_code not in FREE_GIFTS:
+            tg_send_message(chat_id, "❌ Quà không hợp lệ.")
+            return
+        tg_edit_message(chat_id, message_id, free_gift_detail_text(user_id, gift_code), reply_markup=free_gift_confirm_keyboard(gift_code))
+        return
+    if data.startswith("free_claim|"):
+        gift_code = data.split("|", 1)[1]
+        if gift_code not in FREE_GIFTS:
+            tg_send_message(chat_id, "❌ Quà không hợp lệ.")
+            return
+        user_info = get_user_record(user_id)
+        if has_pending_free_request(user_id, gift_code):
+            tg_send_message(chat_id, "⚠️ Bạn đang có yêu cầu quà này chờ xử lý rồi.")
+            return
+        if gift_code == "canva_edu_free":
+            if bool(user_info.get("canva_newbie_claimed", False)):
+                tg_send_message(chat_id, "⚠️ Bạn đã nhận quà tân thủ Canva Edu trước đó rồi.")
+                return
+            USER_STATE[user_id] = {"awaiting_canva_email": True, "gift_code": gift_code}
+            tg_send_message(chat_id, "📩 Vui lòng nhập email để admin add Canva Edu miễn phí.")
+            return
+        cost = int(FREE_GIFTS[gift_code].get("points_cost", 0))
+        if int(user_info.get("points", 0)) < cost:
+            tg_send_message(chat_id, f"⚠️ Bạn chưa đủ điểm để đổi quà này. Cần {cost} điểm.")
+            return
+        update_user_points(user_id, delta_points=-cost, delta_used_points=cost)
+        req = create_free_request(user_id, username, full_name, gift_code)
+        submit_free_request_to_admin(req)
+        tg_send_message(chat_id,
+                        f"✅ Đã gửi yêu cầu nhận {FREE_GIFTS[gift_code]['name']}.\n"
+                        f"Hệ thống đã trừ {cost} điểm. Admin sẽ xử lý sớm.")
         return
     if data == "menu_2fa":
         tg_edit_message(chat_id, message_id,
@@ -1090,6 +1444,51 @@ def handle_callback(cq: Dict[str, Any]):
                         f"Tài khoản: {items[idx].get('account', {}).get('username', '')}\n"
                         f"Hết hạn: {format_expiry(int(items[idx]['expires_at']))}")
         return
+    if data.startswith("free_ok|") or data.startswith("free_out|"):
+        if not is_admin(user_id):
+            tg_send_message(chat_id, "❌ Bạn không phải admin.")
+            return
+        action, request_code = data.split("|", 1)
+        requests_data = get_free_requests()
+        req = requests_data.get(request_code)
+        if not req:
+            tg_send_message(chat_id, "❌ Không tìm thấy request free.")
+            return
+        if req.get("status") not in {"pending_admin", "waiting_email"}:
+            tg_send_message(chat_id, "ℹ️ Request này đã xử lý trước đó.")
+            return
+        if action == "free_ok":
+            req["status"] = "done"
+            req["processed_at"] = now_ts()
+            requests_data[request_code] = req
+            save_free_requests(requests_data)
+            if req.get("gift_code") == "canva_edu_free":
+                mark_canva_claimed(int(req["user_id"]))
+                tg_send_message(int(req["user_id"]),
+                                "✅ Đã add Canva Edu thành công.\n"
+                                "Vui lòng kiểm tra lại email / đăng nhập lại Canva sau ít phút.")
+            else:
+                tg_send_message(int(req["user_id"]),
+                                f"✅ Yêu cầu {req.get('gift_name')} của bạn đã được xử lý thành công.")
+            tg_send_message(chat_id, f"✅ Đã xử lý thành công request {request_code}.")
+            return
+        if action == "free_out":
+            req["status"] = "out_of_stock"
+            req["processed_at"] = now_ts()
+            requests_data[request_code] = req
+            save_free_requests(requests_data)
+            refund_points_for_request(req)
+            if req.get("gift_code") == "canva_edu_free":
+                tg_send_message(int(req["user_id"]),
+                                "⏳ Hiện Canva Edu free đang tạm hết suất xử lý.\n"
+                                "Khi có đợt add tiếp theo bạn có thể gửi lại yêu cầu.")
+            else:
+                tg_send_message(int(req["user_id"]),
+                                f"⏳ {req.get('gift_name')} hiện đang tạm hết suất xử lý.\n"
+                                "Khi có đợt tiếp theo bạn có thể gửi lại yêu cầu. Điểm đã được hoàn lại vào tài khoản của bạn.")
+            tg_send_message(chat_id, f"⏳ Đã đánh dấu tạm hết cho request {request_code}.")
+            return
+
     if data.startswith("adm_"):
         if not is_admin(user_id):
             tg_send_message(chat_id, "❌ Bạn không phải admin.")
@@ -1134,10 +1533,15 @@ def handle_text_message(message: Dict[str, Any]):
     save_user(user_id, username, full_name)
 
     if text.startswith("/"):
-        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products", "/checkstock", "/remindnow")):
+        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products", "/checkstock", "/remindnow", "/free_requests")):
             handle_admin_command(chat_id, user_id, text)
             return
         if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            if len(parts) > 1:
+                ref_code = parts[1].strip()
+                if ref_code:
+                    apply_referral_if_needed(user_id, username, full_name, ref_code)
             open_home(chat_id)
             return
         if text.startswith("/my"):
@@ -1146,6 +1550,20 @@ def handle_text_message(message: Dict[str, Any]):
         if text.startswith("/2fa"):
             tg_send_message(chat_id, "🔐 Chọn trong menu để lấy mã 2FA.", reply_markup=active_2fa_keyboard(user_id))
             return
+
+    state = USER_STATE.get(user_id, {})
+    if state.get("awaiting_canva_email") and state.get("gift_code") == "canva_edu_free":
+        email = text.strip()
+        if "@" not in email or "." not in email.split("@")[-1]:
+            tg_send_message(chat_id, "❌ Email chưa hợp lệ. Vui lòng nhập lại email Canva của bạn.")
+            return
+        req = create_free_request(user_id, username, full_name, "canva_edu_free", email=email)
+        submit_free_request_to_admin(req)
+        USER_STATE.pop(user_id, None)
+        tg_send_message(chat_id,
+                        "✅ Đã ghi nhận email Canva của bạn và gửi admin xử lý.\n"
+                        "Khi có kết quả bot sẽ nhắn lại cho bạn.")
+        return
 
     # Hỗ trợ kiểu cũ: nhập trực tiếp account_key để lấy 2FA, nhưng vẫn kiểm tra còn hạn
     active = customer_active_items(user_id)
