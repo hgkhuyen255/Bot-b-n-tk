@@ -489,8 +489,6 @@ def is_in_stock(product_code: str) -> bool:
 
 
 def stock_label(product_code: str) -> str:
-    if product_code == "canva_free":
-        return "Add mail trực tiếp"
     count = get_stock_count(product_code)
     return f"{count}📦️" if count > 0 else "Hết hàng"
 
@@ -828,15 +826,14 @@ def claim_free_reward(user_id: int, username: str, full_name: str, product_code:
         return {"ok": False, "message": "⚠️ Bạn đã nhận gói free này rồi."}
     if not is_free_reward_eligible(user_id, product_code):
         return {"ok": False, "message": f"⚠️ Bạn chưa đủ điều kiện. {free_product_requirement_text(product_code)}"}
+    if not is_in_stock(product_code):
+        return {"ok": False, "message": "⚠️ Kho quà free hiện đang hết, vui lòng quay lại sau."}
 
     if product_code == "canva_free":
         latest = find_latest_canva_request(user_id)
         if latest and latest.get("status") == "pending_admin":
             return {"ok": False, "message": "⏳ Bạn đã gửi mail nhận Canva trước đó, vui lòng chờ admin xử lý."}
         return {"ok": True, "need_email": True, "message": "📨 Vui lòng gửi email Canva/Gmail bạn muốn nhận Canva Edu."}
-
-    if not is_in_stock(product_code):
-        return {"ok": False, "message": "⚠️ Kho quà free hiện đang hết, vui lòng quay lại sau."}
 
     account_data = allocate_inventory_account(product_code)
     if not account_data:
@@ -928,9 +925,8 @@ def free_menu_keyboard(user_id: int):
     for code in ["canva_free", "capcut_free", "chatgpt_free", "grok_free"]:
         name = FREE_CATALOG[code]["name"]
         progress = free_reward_progress(user_id, code)
-        extra = "Add mail trực tiếp" if code == "canva_free" else stock_label(code)
         rows.append([{
-            "text": f"{name} | {progress} | {extra}",
+            "text": f"{name} | {progress} | {stock_label(code)}",
             "callback_data": f"freeinfo|{code}",
         }])
     rows.append([{"text": "👥 Mời bạn bè", "callback_data": "menu_invite"}])
@@ -940,14 +936,14 @@ def free_menu_keyboard(user_id: int):
 
 def free_detail_keyboard(user_id: int, product_code: str):
     rows = []
-    can_claim = is_free_reward_eligible(user_id, product_code) and not has_claimed_free(user_id, product_code)
+    can_claim = is_free_reward_eligible(user_id, product_code) and not has_claimed_free(user_id, product_code) and is_in_stock(product_code)
     if product_code == "canva_free":
         latest = find_latest_canva_request(user_id)
         latest_status = latest.get("status") if latest else ""
         if can_claim and latest_status not in ("pending_admin", "success"):
             rows.append([{"text": "📨 Gửi mail nhận Canva", "callback_data": f"claimfree|{product_code}"}])
     else:
-        if can_claim and is_in_stock(product_code):
+        if can_claim:
             rows.append([{"text": "🎁 Nhận ngay", "callback_data": f"claimfree|{product_code}"}])
     rows.append([{"text": "👥 Mời bạn bè", "callback_data": "menu_invite"}])
     rows.append([{"text": "⬅️ Về TK Free", "callback_data": "menu_free"}])
@@ -1063,15 +1059,13 @@ def free_detail_text(user_id: int, product_code: str) -> str:
     extra_status = canva_request_status_text(user_id) if product_code == "canva_free" else None
     status = extra_status or ("Đã nhận" if claimed else ("Có thể nhận ngay" if eligible else "Chưa đủ điều kiện"))
     extra_note = ""
-    availability_line = f"Kho hiện tại: {stock_label(product_code)}"
     if product_code == "canva_free":
-        availability_line = "Hình thức nhận: add mail trực tiếp, không dùng kho."
         extra_note = "\nLưu ý: khi nhận Canva Edu, bạn sẽ điền email. Bot sẽ gửi thông tin cho admin xử lý thủ công."
     return (
         f"🎁 {item['name']}\n\n"
         f"Điều kiện: {free_product_requirement_text(product_code)}\n"
         f"Tiến độ: {free_reward_progress(user_id, product_code)}\n"
-        f"{availability_line}\n"
+        f"Kho hiện tại: {stock_label(product_code)}\n"
         f"Trạng thái: {status}\n\n"
         f"Mô tả: {item.get('description', '')}{extra_note}"
     )
@@ -1265,7 +1259,7 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
             lines.append(f"- {code}: {item['name']} | từ {format_money(item['price'])}/tháng | {stock_label(code)}")
         lines.append("\n🎁 Free product code:")
         for code, item in FREE_CATALOG.items():
-            lines.append(f"- {code}: {item['name']} | {free_product_requirement_text(code)} | {("Add mail trực tiếp" if code == "canva_free" else stock_label(code))}")
+            lines.append(f"- {code}: {item['name']} | {free_product_requirement_text(code)} | {stock_label(code)}")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -1275,11 +1269,11 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
             if code not in ALL_CATALOG:
                 tg_send_message(chat_id, "❌ product_code không tồn tại.")
                 return
-            tg_send_message(chat_id, f"📦 {code} | {ALL_CATALOG[code]['name']} | " + ("Canva add mail trực tiếp, không dùng kho" if code == "canva_free" else f"Còn {get_stock_count(code)} tài khoản"))
+            tg_send_message(chat_id, f"📦 {code} | {ALL_CATALOG[code]['name']} | Còn {get_stock_count(code)} tài khoản")
             return
         lines = ["📦 Kiểm tra kho hiện tại:"]
         for code, item in ALL_CATALOG.items():
-            lines.append(f"- {code}: {item['name']} | " + ("Add mail trực tiếp" if code == "canva_free" else stock_label(code)))
+            lines.append(f"- {code}: {item['name']} | {stock_label(code)}")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -1303,7 +1297,7 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         inventory = get_inventory()
         lines = ["📦 Tồn kho:"]
         for code, rows in inventory.items():
-            lines.append(f"- {code}: " + ("Canva add mail trực tiếp, không dùng kho" if code == "canva_free" else f"{len(rows)} tài khoản | {stock_label(code)}"))
+            lines.append(f"- {code}: {len(rows)} tài khoản | {stock_label(code)}")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -1465,7 +1459,7 @@ def process_start(chat_id: int, user_id: int, username: str, full_name: str, tex
     if is_first_join:
         welcome_bonus_msg = (
             "\n\n🎁 Quà tân thủ đã mở:\n"
-            "- Bạn có thể vào menu TK Free để gửi mail nhận Canva Edu miễn phí.\n"
+            "- Bạn có thể vào menu TK Free để nhận Canva Edu miễn phí nếu kho còn hàng.\n"
             "- Lần mua dịch vụ trả phí đầu tiên của bạn sẽ tự giảm 20%."
         )
 
