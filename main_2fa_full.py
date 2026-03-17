@@ -120,6 +120,14 @@ PLATFORM_TREE = {
     "CapCut": ["capcut_shared"],
 }
 
+TERM_OPTIONS = [1, 3, 6, 12]
+TERM_DISCOUNTS = {
+    1: 0.00,
+    3: 0.05,
+    6: 0.10,
+    12: 0.18,
+}
+
 USER_STATE: Dict[int, Dict[str, Any]] = {}
 
 app = FastAPI()
@@ -347,6 +355,31 @@ def generate_qr(amount: int, payment_code: str) -> str:
     )
 
 
+
+def format_money(amount: int) -> str:
+    return f"{int(amount):,}đ".replace(",", ".")
+
+
+def get_term_discount(months: int) -> float:
+    return float(TERM_DISCOUNTS.get(months, 0.0))
+
+
+def get_product_price(product_code: str, months: int = 1) -> int:
+    base_price = int(CATALOG[product_code]["price"])
+    subtotal = base_price * months
+    discount = get_term_discount(months)
+    final_price = int(round(subtotal * (1 - discount)))
+    return max(final_price, 0)
+
+
+def get_duration_days_for_months(months: int) -> int:
+    return int(months) * 30
+
+
+def term_label(months: int) -> str:
+    return f"{months} tháng"
+
+
 def customer_active_items(user_id: int) -> List[Dict[str, Any]]:
     customers = get_customers()
     items = customers.get(str(user_id), {}).get("products", [])
@@ -378,6 +411,7 @@ def add_customer_product(user_id: int, username: str, full_name: str, product_co
         "platform": CATALOG[product_code]["platform"],
         "type": CATALOG[product_code]["type"],
         "duration_days": duration_days,
+        "months": max(1, int(duration_days // 30)),
         "expires_at": expires_at,
         "order_code": order_code,
         "status": "active",
@@ -546,18 +580,35 @@ def product_menu_keyboard(platform: str):
     for code in PLATFORM_TREE.get(platform, []):
         item = CATALOG[code]
         rows.append([{
-            "text": f"{item['name']} - {item['price']:,}đ/{item['duration_days']} ngày".replace(",", "."),
+            "text": f"{item['name']} - từ {format_money(get_product_price(code, 1))}/tháng",
             "callback_data": f"buy|{code}",
         }])
     rows.append([{"text": "⬅️ Chọn nền tảng khác", "callback_data": "menu_buy"}])
     return {"inline_keyboard": rows}
 
 
-def confirm_buy_keyboard(product_code: str):
+def term_menu_keyboard(product_code: str):
+    rows = []
+    for months in TERM_OPTIONS:
+        total_price = get_product_price(product_code, months)
+        discount = int(get_term_discount(months) * 100)
+        if discount > 0:
+            label = f"{term_label(months)} | {format_money(total_price)} | giảm {discount}%"
+        else:
+            label = f"{term_label(months)} | {format_money(total_price)}"
+        rows.append([{
+            "text": label,
+            "callback_data": f"term|{product_code}|{months}",
+        }])
+    rows.append([{"text": "⬅️ Quay lại sản phẩm", "callback_data": f"platform|{CATALOG[product_code]['platform']}"}])
+    return {"inline_keyboard": rows}
+
+
+def confirm_buy_keyboard(product_code: str, months: int):
     return {
         "inline_keyboard": [
-            [{"text": "💳 Thanh toán", "callback_data": f"pay|{product_code}"}],
-            [{"text": "⬅️ Quay lại", "callback_data": f"platform|{CATALOG[product_code]['platform']}"}],
+            [{"text": "💳 Thanh toán", "callback_data": f"pay|{product_code}|{months}"}],
+            [{"text": "⬅️ Chọn thời hạn khác", "callback_data": f"buy|{product_code}"}],
         ]
     }
 
@@ -635,8 +686,10 @@ def my_products_text(user_id: int) -> str:
         status = "Còn hạn" if int(item.get("expires_at", 0)) > current and item.get("status") == "active" else "Hết hạn"
         acc = item.get("account", {})
         account_line = acc.get("username", "Admin cấp thủ công")
+        months = int(item.get("months", max(1, int(item.get("duration_days", 30) // 30))))
         lines.append(
             f"{idx}. {item['product_name']}\n"
+            f"- Thời hạn: {term_label(months)}\n"
             f"- TK: {account_line}\n"
             f"- Hết hạn: {format_expiry(int(item.get('expires_at', 0)))}\n"
             f"- Trạng thái: {status}\n"
@@ -647,10 +700,11 @@ def my_products_text(user_id: int) -> str:
 # ============================================================
 # ORDER PROCESSING
 # ============================================================
-def create_pending_order(user_id: int, chat_id: int, username: str, full_name: str, product_code: str) -> Dict[str, Any]:
+def create_pending_order(user_id: int, chat_id: int, username: str, full_name: str, product_code: str, months: int = 1) -> Dict[str, Any]:
     orders = get_pending_orders()
     order_code = make_payment_code(product_code, user_id)
-    item = CATALOG[product_code]
+    price = get_product_price(product_code, months)
+    duration_days = get_duration_days_for_months(months)
     orders[order_code] = {
         "order_code": order_code,
         "user_id": user_id,
@@ -658,8 +712,11 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
         "username": username,
         "full_name": full_name,
         "product_code": product_code,
-        "price": item["price"],
-        "duration_days": item["duration_days"],
+        "months": months,
+        "price": price,
+        "base_monthly_price": int(CATALOG[product_code]["price"]),
+        "discount_percent": int(get_term_discount(months) * 100),
+        "duration_days": duration_days,
         "status": "waiting_payment",
         "created_at": now_ts(),
     }
@@ -766,7 +823,7 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
     if cmd == "/products":
         lines = ["📋 Product code hiện có:"]
         for code, item in CATALOG.items():
-            lines.append(f"- {code}: {item['name']} | {item['price']:,}đ".replace(",", "."))
+            lines.append(f"- {code}: {item['name']} | từ {format_money(item['price'])}/tháng")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -793,7 +850,7 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
             return
         lines = ["🧾 Đơn đang chờ:"]
         for k, v in pending.items():
-            lines.append(f"- {k} | {v['product_code']} | {v.get('username','')} | {v['price']:,}đ".replace(",", "."))
+            lines.append(f"- {k} | {v['product_code']} | {term_label(int(v.get('months', 1)))} | {v.get('username','')} | {format_money(v['price'])}")
         tg_send_message(chat_id, "\n".join(lines))
         return
 
@@ -930,16 +987,23 @@ def handle_callback(cq: Dict[str, Any]):
         return
     if data.startswith("buy|"):
         code = data.split("|", 1)[1]
-        tg_edit_message(chat_id, message_id, product_detail_text(code), reply_markup=confirm_buy_keyboard(code))
+        tg_edit_message(chat_id, message_id, product_detail_text(code), reply_markup=term_menu_keyboard(code))
+        return
+    if data.startswith("term|"):
+        _, code, months_raw = data.split("|", 2)
+        months = int(months_raw)
+        tg_edit_message(chat_id, message_id, product_detail_text(code, months), reply_markup=confirm_buy_keyboard(code, months))
         return
     if data.startswith("pay|"):
-        code = data.split("|", 1)[1]
-        order = create_pending_order(user_id, chat_id, username, full_name, code)
+        _, code, months_raw = data.split("|", 2)
+        months = int(months_raw)
+        order = create_pending_order(user_id, chat_id, username, full_name, code, months)
         qr_url = generate_qr(order["price"], order["order_code"])
         caption = (
             f"🧾 Mã đơn: {order['order_code']}\n"
             f"Gói: {CATALOG[code]['name']}\n"
-            f"Số tiền: {order['price']:,}đ\n\n".replace(",", ".") +
+            f"Thời hạn: {term_label(months)} ({order['duration_days']} ngày)\n"
+            f"Số tiền: {format_money(order['price'])}\n\n"
             "1. Quét QR để thanh toán\n"
             "2. Chuyển đúng nội dung\n"
             "3. Bấm 'Tôi đã chuyển khoản'\n"
@@ -962,8 +1026,9 @@ def handle_callback(cq: Dict[str, Any]):
             "💸 Khách báo đã chuyển khoản\n"
             f"- User: @{order.get('username', '')} | ID: {order['user_id']}\n"
             f"- Gói: {CATALOG[order['product_code']]['name']}\n"
+            f"- Thời hạn: {term_label(int(order.get('months', 1)))}\n"
             f"- Mã đơn: {order_code}\n"
-            f"- Số tiền: {order['price']:,}đ".replace(",", "."),
+            f"- Số tiền: {format_money(order['price'])}",
             reply_markup=admin_order_keyboard(order_code),
         )
         tg_send_message(chat_id, "✅ Đã ghi nhận. Admin sẽ kiểm tra và xác nhận đơn cho bạn.")
