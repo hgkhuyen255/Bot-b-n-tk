@@ -1565,7 +1565,15 @@ def handle_text_message(message: Dict[str, Any]):
         return
 
     save_user(user_id, username, full_name)
-
+    if text.startswith("/start"):
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1:
+            ref_code = parts[1].strip()
+            if ref_code:
+                apply_referral_if_needed(user_id, username, full_name, ref_code)
+    
+        open_home(chat_id)
+        return
     if text.startswith((
         "/admin", "/addstock", "/addsecret", "/delsecret", "/grant",
         "/setprice", "/inventory", "/orders", "/products",
@@ -1573,20 +1581,14 @@ def handle_text_message(message: Dict[str, Any]):
     )):
         handle_admin_command(chat_id, user_id, text)
         return
-        if text.startswith("/start"):
-            parts = text.split(maxsplit=1)
-            if len(parts) > 1:
-                ref_code = parts[1].strip()
-                if ref_code:
-                    apply_referral_if_needed(user_id, username, full_name, ref_code)
-            open_home(chat_id)
-            return
-        if text.startswith("/my"):
-            tg_send_message(chat_id, my_products_text(user_id), reply_markup=main_menu_keyboard())
-            return
-        if text.startswith("/2fa"):
-            tg_send_message(chat_id, "🔐 Chọn trong menu để lấy mã 2FA.", reply_markup=active_2fa_keyboard(user_id))
-            return
+        
+        
+    if text.startswith("/my"):
+        tg_send_message(chat_id, my_products_text(user_id), reply_markup=main_menu_keyboard())
+        return
+    if text.startswith("/2fa"):
+        tg_send_message(chat_id, "🔐 Chọn trong menu để lấy mã 2FA.", reply_markup=active_2fa_keyboard(user_id))
+        return
 
     state = USER_STATE.get(user_id, {})
     if state.get("awaiting_canva_email") and state.get("gift_code") == "canva_edu_free":
