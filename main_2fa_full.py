@@ -42,6 +42,7 @@ INVENTORY_FILE = "inventory.json"
 CUSTOMERS_FILE = "customers.json"
 ORDERS_FILE = "orders.json"
 PENDING_ORDERS_FILE = "pending_orders.json"
+REMINDER_LOG_FILE = "reminder_log.json"
 
 # ============================================================
 # CATALOG / DEFAULT CONFIG
@@ -195,6 +196,7 @@ def ensure_bootstrap_files() -> None:
         (CUSTOMERS_FILE, {}),
         (ORDERS_FILE, {}),
         (PENDING_ORDERS_FILE, {}),
+        (REMINDER_LOG_FILE, {}),
     ]:
         if load_gist_json(filename, None) is None:
             save_gist_json(filename, default)
@@ -312,6 +314,25 @@ def save_secrets(data: Dict[str, str]):
     save_gist_json(SECRETS_FILE, data)
 
 
+def get_reminder_log() -> Dict[str, Any]:
+    return load_gist_json(REMINDER_LOG_FILE, {})
+
+
+def save_reminder_log(data: Dict[str, Any]):
+    save_gist_json(REMINDER_LOG_FILE, data)
+
+
+def today_key() -> str:
+    return time.strftime("%Y-%m-%d", time.localtime())
+
+
+def days_until_expiry(expires_at: int) -> int:
+    now = time.time()
+    if expires_at <= now:
+        return 0
+    return int((expires_at - now) // 86400) + 1
+
+
 def make_payment_code(product_code: str, user_id: int) -> str:
     return f"{product_code}-{user_id}-{int(time.time())}"
 
@@ -421,6 +442,81 @@ def get_totp_for_account_key(account_key: str) -> Optional[str]:
         return pyotp.TOTP(secret).now()
     except Exception:
         return None
+
+
+def build_expiry_reminder_text(item: Dict[str, Any], days_left: int) -> str:
+    product_name = item.get("product_name", "Gói dịch vụ")
+    account_username = item.get("account", {}).get("username", "Admin cấp thủ công")
+    expiry_text = format_expiry(int(item.get("expires_at", 0)))
+
+    if days_left == 2:
+        head = "⏰ Nhắc hạn: gói của bạn còn 2 ngày sẽ hết hạn."
+    elif days_left == 1:
+        head = "⏰ Nhắc hạn: gói của bạn còn 1 ngày sẽ hết hạn."
+    else:
+        head = "⚠️ Gói của bạn hết hạn hôm nay."
+
+    return (
+        f"{head}\n\n"
+        f"Gói: {product_name}\n"
+        f"Tài khoản: {account_username}\n"
+        f"Hết hạn: {expiry_text}\n\n"
+        "Nếu muốn tiếp tục sử dụng, vui lòng gia hạn sớm để tránh gián đoạn và không bị mất quyền lấy mã 2FA."
+    )
+
+
+def process_expiry_reminders() -> Dict[str, Any]:
+    customers = get_customers()
+    reminder_log = get_reminder_log()
+    today = today_key()
+    sent = []
+    skipped = 0
+
+    for user_id, customer in customers.items():
+        items = customer.get("products", [])
+        for idx, item in enumerate(items):
+            if item.get("status", "active") != "active":
+                continue
+
+            expires_at = int(item.get("expires_at", 0) or 0)
+            if expires_at <= 0:
+                skipped += 1
+                continue
+
+            days_left = days_until_expiry(expires_at)
+            if days_left not in (2, 1, 0):
+                continue
+
+            log_key = f"{user_id}:{idx}:{today}"
+            if reminder_log.get(log_key):
+                continue
+
+            try:
+                tg_send_message(int(user_id), build_expiry_reminder_text(item, days_left))
+                reminder_log[log_key] = {
+                    "user_id": int(user_id),
+                    "product_index": idx,
+                    "product_code": item.get("product_code"),
+                    "days_left": days_left,
+                    "sent_at": now_ts(),
+                    "date": today,
+                }
+                sent.append({
+                    "user_id": int(user_id),
+                    "product_code": item.get("product_code"),
+                    "days_left": days_left,
+                })
+            except Exception:
+                skipped += 1
+
+    save_reminder_log(reminder_log)
+    return {
+        "ok": True,
+        "date": today,
+        "sent_count": len(sent),
+        "sent": sent,
+        "skipped": skipped,
+    }
 
 
 # ============================================================
@@ -650,7 +746,8 @@ def admin_help() -> str:
         "/setprice <product_code> <price>\n"
         "/orders\n"
         "/inventory\n"
-        "/products"
+        "/products\n"
+        "/remindnow"
     )
 
 
@@ -671,6 +768,14 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         for code, item in CATALOG.items():
             lines.append(f"- {code}: {item['name']} | {item['price']:,}đ".replace(",", "."))
         tg_send_message(chat_id, "\n".join(lines))
+        return
+
+    if cmd == "/remindnow":
+        result = process_expiry_reminders()
+        tg_send_message(
+            chat_id,
+            f"✅ Đã chạy nhắc hạn. Ngày: {result['date']} | Đã gửi: {result['sent_count']} | Bỏ qua: {result['skipped']}"
+        )
         return
 
     if cmd == "/inventory":
@@ -930,7 +1035,7 @@ def handle_text_message(message: Dict[str, Any]):
     save_user(user_id, username, full_name)
 
     if text.startswith("/"):
-        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products")):
+        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products", "/remindnow")):
             handle_admin_command(chat_id, user_id, text)
             return
         if text.startswith("/start"):
@@ -972,6 +1077,7 @@ def home():
         "webhook_path": WEBHOOK_PATH,
         "webhook_url": WEBHOOK_URL,
         "catalog_size": len(CATALOG),
+        "reminder_endpoint": "/cron/remind_expiring",
     }
 
 
@@ -991,6 +1097,12 @@ async def telegram_webhook(request: Request):
         return PlainTextResponse("OK")
 
     return PlainTextResponse("OK")
+
+
+@app.post("/cron/remind_expiring")
+async def cron_remind_expiring():
+    result = process_expiry_reminders()
+    return JSONResponse(result)
 
 
 @app.post("/payment_webhook")
