@@ -681,6 +681,35 @@ def format_expiry(ts: int) -> str:
     return time.strftime("%d/%m/%Y %H:%M", time.localtime(ts))
 
 
+def extend_customer_product(user_id: int, item_index: int, duration_days: int,
+                            order_code: str, delivered_by: str = "system") -> Dict[str, Any]:
+    customers = get_customers()
+    key = str(user_id)
+
+    if key not in customers:
+        raise ValueError("customer_not_found")
+
+    items = customers[key].get("products", [])
+    if item_index < 0 or item_index >= len(items):
+        raise ValueError("product_not_found")
+
+    item = items[item_index]
+    base_time = max(now_ts(), int(item.get("expires_at", 0) or 0))
+    new_expires_at = base_time + duration_days * 86400
+
+    item["expires_at"] = new_expires_at
+    item["duration_days"] = int(item.get("duration_days", 0)) + duration_days
+    item["months"] = max(1, int(round(item["duration_days"] / 30)))
+    item["status"] = "active"
+    item["last_renewed_at"] = now_ts()
+    item["last_renew_order_code"] = order_code
+    item["delivered_by"] = delivered_by
+
+    customers[key]["products"][item_index] = item
+    save_customers(customers)
+    return item
+
+
 def allocate_inventory_account(product_code: str) -> Optional[Dict[str, Any]]:
     inventory = get_inventory()
     rows = inventory.get(product_code, [])
@@ -698,6 +727,8 @@ def add_inventory_account(product_code: str, username: str, password: str,
     inventory.setdefault(product_code, []).append({
         "username": username,
         "password": password,
+        "account_key": account_key,
+        "note": note,
         "created_at": now_ts(),
     })
     save_inventory(inventory)
@@ -748,6 +779,15 @@ def build_expiry_reminder_text(item: Dict[str, Any], days_left: int) -> str:
     )
 
 
+def build_expiry_reminder_keyboard(item_index: int):
+    return {
+        "inline_keyboard": [
+            [{"text": "🔄 Gia hạn ngay", "callback_data": f"renew|{item_index}"}],
+            [{"text": "📦 Tài khoản của tôi", "callback_data": "menu_my"}],
+        ]
+    }
+
+
 def process_expiry_reminders() -> Dict[str, Any]:
     customers = get_customers()
     reminder_log = get_reminder_log()
@@ -775,7 +815,7 @@ def process_expiry_reminders() -> Dict[str, Any]:
                 continue
 
             try:
-                tg_send_message(int(user_id), build_expiry_reminder_text(item, days_left))
+                tg_send_message(int(user_id), build_expiry_reminder_text(item, days_left), reply_markup=build_expiry_reminder_keyboard(idx))
                 reminder_log[log_key] = {
                     "user_id": int(user_id),
                     "product_index": idx,
@@ -907,6 +947,59 @@ def active_2fa_keyboard(user_id: int):
         rows = [[{"text": "Chưa có gói hợp lệ", "callback_data": "noop"}]]
     rows.append([{"text": "⬅️ Về menu", "callback_data": "home"}])
     return {"inline_keyboard": rows}
+
+
+def my_products_keyboard(user_id: int):
+    items = customer_all_items(user_id)
+    current = now_ts()
+    rows = []
+
+    for idx, item in enumerate(items):
+        product_code = item.get("product_code")
+        if product_code not in CATALOG:
+            continue
+
+        status_active = int(item.get("expires_at", 0)) > current and item.get("status") == "active"
+        label_status = "Còn hạn" if status_active else "Hết hạn"
+        rows.append([{
+            "text": f"🔄 Gia hạn {item.get('product_name', 'Gói')} | {label_status}"[:64],
+            "callback_data": f"renew|{idx}",
+        }])
+
+    if not rows:
+        rows = [[{"text": "⬅️ Về menu", "callback_data": "home"}]]
+    else:
+        rows.append([{"text": "⬅️ Về menu", "callback_data": "home"}])
+    return {"inline_keyboard": rows}
+
+
+def renew_term_menu_keyboard(user_id: int, item_index: int):
+    items = customer_all_items(user_id)
+    if item_index < 0 or item_index >= len(items):
+        return {"inline_keyboard": [[{"text": "⬅️ Về menu", "callback_data": "home"}]]}
+
+    item = items[item_index]
+    product_code = item["product_code"]
+    rows = []
+
+    for months in TERM_OPTIONS:
+        total_price = get_product_price(product_code, months)
+        rows.append([{
+            "text": f"{term_label(months)} | {format_money(total_price)}",
+            "callback_data": f"renew_term|{item_index}|{months}",
+        }])
+
+    rows.append([{"text": "⬅️ Quay lại tài khoản của tôi", "callback_data": "menu_my"}])
+    return {"inline_keyboard": rows}
+
+
+def renew_confirm_keyboard(item_index: int, months: int):
+    return {
+        "inline_keyboard": [
+            [{"text": "💳 Thanh toán gia hạn", "callback_data": f"renew_pay|{item_index}|{months}"}],
+            [{"text": "⬅️ Chọn thời hạn khác", "callback_data": f"renew|{item_index}"}],
+        ]
+    }
 
 
 # ============================================================
@@ -1359,7 +1452,7 @@ def handle_callback(cq: Dict[str, Any]):
         tg_edit_message(chat_id, message_id, get_settings().get("support", "Liên hệ admin để được hỗ trợ."), reply_markup=main_menu_keyboard())
         return
     if data == "menu_my":
-        tg_edit_message(chat_id, message_id, my_products_text(user_id), reply_markup=main_menu_keyboard())
+        tg_edit_message(chat_id, message_id, my_products_text(user_id), reply_markup=my_products_keyboard(user_id))
         return
     if data.startswith("free_gift|"):
         gift_code = data.split("|", 1)[1]
@@ -1584,7 +1677,7 @@ def handle_text_message(message: Dict[str, Any]):
         
         
     if text.startswith("/my"):
-        tg_send_message(chat_id, my_products_text(user_id), reply_markup=main_menu_keyboard())
+        tg_send_message(chat_id, my_products_text(user_id), reply_markup=my_products_keyboard(user_id))
         return
     if text.startswith("/2fa"):
         tg_send_message(chat_id, "🔐 Chọn trong menu để lấy mã 2FA.", reply_markup=active_2fa_keyboard(user_id))
