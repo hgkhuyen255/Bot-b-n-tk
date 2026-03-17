@@ -698,8 +698,6 @@ def add_inventory_account(product_code: str, username: str, password: str,
     inventory.setdefault(product_code, []).append({
         "username": username,
         "password": password,
-        "account_key": account_key,
-        "note": note,
         "created_at": now_ts(),
     })
     save_inventory(inventory)
@@ -718,9 +716,9 @@ def delete_secret(account_key: str):
         save_secrets(secrets)
 
 
-def get_totp_for_account_key(account_key: str) -> Optional[str]:
+def get_totp_for_account_key(account_key: str):
     secrets = get_secrets()
-    secret = secrets.get(account_key)
+    secret = secrets.get(account_key) 
     if not secret:
         return None
     try:
@@ -901,7 +899,7 @@ def active_2fa_keyboard(user_id: int):
     active = customer_active_items(user_id)
     rows = []
     for idx, item in enumerate(active):
-        account_key = item.get("account", {}).get("account_key")
+        account_key = item.get("account", {}).get("username")
         if account_key:
             label = f"{item['product_name']} | {item.get('account', {}).get('username', 'N/A')}"
             rows.append([{"text": label[:60], "callback_data": f"get2fa|{idx}"}])
@@ -1063,7 +1061,7 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
             )
             if account_data.get("note"):
                 message += f"Ghi chú: {account_data['note']}\n"
-            if account_data.get("account_key"):
+            if account_data.get("username"):
                 message += "\nBạn có thể vào mục 🔐 Lấy mã 2FA khi cần."
         else:
             message = (
@@ -1114,16 +1112,18 @@ def is_admin(user_id: int) -> bool:
 def admin_help() -> str:
     return (
         "🛠 Lệnh admin:\n\n"
-        "/addstock <product_code> <username> <password> [account_key] [note]\n"
-        "/addsecret <account_key> <base32_secret>\n"
-        "/delsecret <account_key>\n"
-        "/grant <user_id> <product_code> <days> <username> <password> [account_key]\n"
+        "/addstock <product_code> <username> <password> [note]\n"
+        "/addsecret <username> <base32_secret>\n"
+        "/delsecret <username>\n"
+        "/grant <user_id> <product_code> <days> <username> <password>\n"
         "/setprice <product_code> <price>\n"
         "/orders\n"
         "/inventory\n"
         "/products\n"
         "/checkstock [product_code]\n"
-        "/remindnow"
+        "/free_requests\n"
+        "/remindnow\n"
+        "/broadcast <message>"
     )
 
 
@@ -1237,7 +1237,31 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         add_inventory_account(product_code, username, password, account_key, note)
         tg_send_message(chat_id, f"✅ Đã thêm kho cho {product_code}. Tồn kho hiện tại: {get_stock_count(product_code)}")
         return
-
+    if cmd == "/broadcast":
+        if len(parts) < 2:
+            tg_send_message(chat_id, "❌ Nhập nội dung cần gửi.")
+            return
+    
+        message_text = text.replace("/broadcast", "", 1).strip()
+        users = get_users()
+    
+        success = 0
+        fail = 0
+    
+        for uid in users.keys():
+            try:
+                tg_send_message(int(uid), message_text)
+                success += 1
+                time.sleep(0.05)  # tránh spam limit
+            except:
+                fail += 1
+    
+        tg_send_message(chat_id,
+            f"📢 Broadcast xong\n"
+            f"✅ Thành công: {success}\n"
+            f"❌ Lỗi: {fail}"
+        )
+        return
     if cmd == "/grant" and len(parts) >= 6:
         try:
             target_user_id = int(parts[1])
@@ -1246,14 +1270,17 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         except ValueError:
             tg_send_message(chat_id, "❌ Sai định dạng /grant.")
             return
+    
         if product_code not in CATALOG:
             tg_send_message(chat_id, "❌ product_code không tồn tại.")
             return
+    
         username_acc = parts[4]
         password_acc = parts[5]
-        account_key = parts[6] if len(parts) >= 7 else ""
+    
         users = load_gist_json(USERS_FILE, {})
         user_info = users.get(str(target_user_id), {})
+    
         record = add_customer_product(
             user_id=target_user_id,
             username=user_info.get("username", ""),
@@ -1262,19 +1289,26 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
             account_data={
                 "username": username_acc,
                 "password": password_acc,
-                "account_key": account_key,
             },
             duration_days=days,
             order_code=f"manual-{int(time.time())}",
             delivered_by="admin",
         )
-        tg_send_message(chat_id, f"✅ Đã cấp thủ công cho user {target_user_id}. Hết hạn: {format_expiry(record['expires_at'])}")
-        tg_send_message(target_user_id,
-                        f"🎁 Admin đã cấp cho bạn: {CATALOG[product_code]['name']}\n"
-                        f"Tài khoản: {username_acc}\nMật khẩu: {password_acc}\n"
-                        f"Hết hạn: {format_expiry(record['expires_at'])}")
+    
+        tg_send_message(
+            chat_id,
+            f"✅ Đã cấp thủ công cho user {target_user_id}. Hết hạn: {format_expiry(record['expires_at'])}"
+        )
+    
+        tg_send_message(
+            target_user_id,
+            f"🎁 Admin đã cấp cho bạn: {CATALOG[product_code]['name']}\n"
+            f"Tài khoản: {username_acc}\n"
+            f"Mật khẩu: {password_acc}\n"
+            f"Hết hạn: {format_expiry(record['expires_at'])}"
+        )
         return
-
+    
     tg_send_message(chat_id, "❌ Lệnh không hợp lệ. Dùng /admin để xem hướng dẫn.")
 
 
@@ -1431,7 +1465,7 @@ def handle_callback(cq: Dict[str, Any]):
         if idx < 0 or idx >= len(items):
             tg_send_message(chat_id, "❌ Không tìm thấy tài khoản hợp lệ.")
             return
-        account_key = items[idx].get("account", {}).get("account_key")
+        account_key = items[idx].get("account", {}).get("username")
         if not account_key:
             tg_send_message(chat_id, "⚠️ Tài khoản này chưa được cấu hình 2FA.")
             return
@@ -1532,10 +1566,13 @@ def handle_text_message(message: Dict[str, Any]):
 
     save_user(user_id, username, full_name)
 
-    if text.startswith("/"):
-        if text.startswith(("/admin", "/addstock", "/addsecret", "/delsecret", "/grant", "/setprice", "/inventory", "/orders", "/products", "/checkstock", "/remindnow", "/free_requests")):
-            handle_admin_command(chat_id, user_id, text)
-            return
+    if text.startswith((
+        "/admin", "/addstock", "/addsecret", "/delsecret", "/grant",
+        "/setprice", "/inventory", "/orders", "/products",
+        "/checkstock", "/remindnow", "/free_requests", "/broadcast"
+    )):
+        handle_admin_command(chat_id, user_id, text)
+        return
         if text.startswith("/start"):
             parts = text.split(maxsplit=1)
             if len(parts) > 1:
@@ -1567,7 +1604,7 @@ def handle_text_message(message: Dict[str, Any]):
 
     # Hỗ trợ kiểu cũ: nhập trực tiếp account_key để lấy 2FA, nhưng vẫn kiểm tra còn hạn
     active = customer_active_items(user_id)
-    direct = next((x for x in active if x.get("account", {}).get("account_key") == text), None)
+    direct = next((x for x in active if x.get("account", {}).get("username") == text), None)
     if direct:
         code = get_totp_for_account_key(text)
         if code:
