@@ -23,9 +23,9 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 
 _admin_env = os.getenv("ADMIN_CHAT_ID", "")
 try:
-    ADMIN_CHAT_ID = int(_admin_env) if _admin_env else 5816758036
+    ADMIN_CHAT_ID = int(_admin_env) if _admin_env else 1375879773
 except ValueError:
-    ADMIN_CHAT_ID = 5816758036
+    ADMIN_CHAT_ID = 1375879773
 
 GIST_URL = f"https://api.github.com/gists/{GIST_ID}" if GIST_ID else ""
 GIST_HEADERS = {
