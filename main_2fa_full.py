@@ -1,10 +1,10 @@
 import json
 import os
 import time
-from datetime import datetime
 import requests
 import pyotp
 from typing import Any, Dict, List, Optional
+from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
 
@@ -401,6 +401,7 @@ def create_free_request(user_id: int, username: str, full_name: str, gift_code: 
         "points_cost": int(gift.get("points_cost", 0)),
         "status": "pending_admin" if email or gift.get("kind") != "email_admin" else "waiting_email",
         "created_at": now_ts(),
+        "renewal_item_index": renewal_item_index,
     }
     save_free_requests(requests_data)
     return requests_data[req_code]
@@ -802,24 +803,81 @@ def customer_all_items(user_id: int) -> List[Dict[str, Any]]:
     return customers.get(str(user_id), {}).get("products", [])
 
 
-def find_customer_product_index(user_id: int, product_code: str) -> Optional[int]:
+def find_customer_product_index(user_id: int, product_code: str) -> int:
     items = customer_all_items(user_id)
-    match_index = None
-    match_expiry = -1
-    for idx, item in enumerate(items):
-        if item.get("product_code") != product_code:
-            continue
-        expires_at = int(item.get("expires_at", 0) or 0)
-        if expires_at >= match_expiry:
-            match_index = idx
-            match_expiry = expires_at
-    return match_index
+    current = now_ts()
+
+    active_matches = [
+        idx for idx, item in enumerate(items)
+        if item.get("product_code") == product_code
+        and item.get("status", "active") == "active"
+        and int(item.get("expires_at", 0) or 0) > current
+    ]
+    if active_matches:
+        active_matches.sort(key=lambda i: int(items[i].get("expires_at", 0) or 0), reverse=True)
+        return active_matches[0]
+
+    any_matches = [idx for idx, item in enumerate(items) if item.get("product_code") == product_code]
+    if any_matches:
+        any_matches.sort(key=lambda i: int(items[i].get("expires_at", 0) or 0), reverse=True)
+        return any_matches[0]
+
+    return -1
+
+
+def set_customer_product_expiry(user_id: int, item_index: int, expires_at: int,
+                                order_code: str = "manual-setexpiry", delivered_by: str = "admin",
+                                account_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    customers = get_customers()
+    key = str(user_id)
+
+    if key not in customers:
+        raise ValueError("customer_not_found")
+
+    items = customers[key].get("products", [])
+    if item_index < 0 or item_index >= len(items):
+        raise ValueError("product_not_found")
+
+    item = items[item_index]
+    item["expires_at"] = int(expires_at)
+    remaining_days = max(0, int(round((int(expires_at) - now_ts()) / 86400)))
+    item["duration_days"] = remaining_days
+    item["months"] = max(1, int(round(remaining_days / 30))) if remaining_days > 0 else 1
+    item["status"] = "active" if int(expires_at) > now_ts() else "expired"
+    item["last_manual_set_at"] = now_ts()
+    item["last_renew_order_code"] = order_code
+    item["delivered_by"] = delivered_by
+    if account_data:
+        item["account"] = account_data
+
+    customers[key]["products"][item_index] = item
+    save_customers(customers)
+    return item
 
 
 def add_customer_product(user_id: int, username: str, full_name: str, product_code: str,
                          account_data: Optional[Dict[str, Any]], duration_days: int,
                          order_code: str, delivered_by: str = "system",
-                         merge_same_product: bool = True) -> Dict[str, Any]:
+                         merge_same_product: bool = False) -> Dict[str, Any]:
+    if merge_same_product:
+        existing_index = find_customer_product_index(user_id, product_code)
+        if existing_index >= 0:
+            item = extend_customer_product(
+                user_id=user_id,
+                item_index=existing_index,
+                duration_days=duration_days,
+                order_code=order_code,
+                delivered_by=delivered_by,
+                account_data=account_data,
+            )
+            customers = get_customers()
+            key = str(user_id)
+            if key in customers:
+                customers[key]["username"] = username or customers[key].get("username", "")
+                customers[key]["full_name"] = full_name or customers[key].get("full_name", "")
+                save_customers(customers)
+            return item
+
     customers = get_customers()
     key = str(user_id)
     if key not in customers:
@@ -829,34 +887,6 @@ def add_customer_product(user_id: int, username: str, full_name: str, product_co
             "created_at": now_ts(),
             "products": [],
         }
-
-    customers[key]["username"] = username
-    customers[key]["full_name"] = full_name
-    items = customers[key].setdefault("products", [])
-
-    if merge_same_product:
-        existing_index = find_customer_product_index(user_id, product_code)
-        if existing_index is not None and existing_index < len(items):
-            item = items[existing_index]
-            base_time = max(now_ts(), int(item.get("expires_at", 0) or 0))
-            item["expires_at"] = base_time + duration_days * 86400
-            item["duration_days"] = int(item.get("duration_days", 0) or 0) + duration_days
-            item["months"] = max(1, int(round(item["duration_days"] / 30)))
-            item["status"] = "active"
-            item["product_name"] = CATALOG[product_code]["name"]
-            item["platform"] = CATALOG[product_code]["platform"]
-            item["type"] = CATALOG[product_code]["type"]
-            item["last_renewed_at"] = now_ts()
-            item["last_renew_order_code"] = order_code
-            item["delivered_by"] = delivered_by
-            if account_data:
-                merged_account = dict(item.get("account", {}) or {})
-                merged_account.update({k: v for k, v in account_data.items() if v not in (None, "")})
-                item["account"] = merged_account
-            customers[key]["products"][existing_index] = item
-            save_customers(customers)
-            return item
-
     expires_at = now_ts() + duration_days * 86400
     record = {
         "product_code": product_code,
@@ -872,7 +902,9 @@ def add_customer_product(user_id: int, username: str, full_name: str, product_co
         "account": account_data or {},
         "created_at": now_ts(),
     }
-    items.append(record)
+    customers[key]["username"] = username
+    customers[key]["full_name"] = full_name
+    customers[key].setdefault("products", []).append(record)
     save_customers(customers)
     return record
 
@@ -881,13 +913,9 @@ def format_expiry(ts: int) -> str:
     return time.strftime("%d/%m/%Y %H:%M", time.localtime(ts))
 
 
-def parse_datetime_input(value: str) -> int:
-    parsed = datetime.strptime(value.strip(), "%Y-%m-%d %H:%M")
-    return int(time.mktime(parsed.timetuple()))
-
-
 def extend_customer_product(user_id: int, item_index: int, duration_days: int,
-                            order_code: str, delivered_by: str = "system") -> Dict[str, Any]:
+                            order_code: str, delivered_by: str = "system",
+                            account_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     customers = get_customers()
     key = str(user_id)
 
@@ -903,38 +931,15 @@ def extend_customer_product(user_id: int, item_index: int, duration_days: int,
     new_expires_at = base_time + duration_days * 86400
 
     item["expires_at"] = new_expires_at
-    item["duration_days"] = int(item.get("duration_days", 0)) + duration_days
+    item["duration_days"] = int(item.get("duration_days", 0) or 0) + duration_days
     item["months"] = max(1, int(round(item["duration_days"] / 30)))
     item["status"] = "active"
     item["last_renewed_at"] = now_ts()
     item["last_renew_order_code"] = order_code
     item["delivered_by"] = delivered_by
-
-    customers[key]["products"][item_index] = item
-    save_customers(customers)
-    return item
-
-
-def set_customer_product_expiry(user_id: int, item_index: int, expires_at: int,
-                                order_code: str = "manual-setexpiry", delivered_by: str = "admin") -> Dict[str, Any]:
-    customers = get_customers()
-    key = str(user_id)
-    if key not in customers:
-        raise ValueError("customer_not_found")
-
-    items = customers[key].get("products", [])
-    if item_index < 0 or item_index >= len(items):
-        raise ValueError("product_not_found")
-
-    item = items[item_index]
-    item["expires_at"] = int(expires_at)
-    remaining_days = max(0, int((int(expires_at) - now_ts()) // 86400))
-    item["duration_days"] = max(int(item.get("duration_days", 0) or 0), remaining_days)
-    item["months"] = max(1, int(round(max(item["duration_days"], 1) / 30)))
-    item["status"] = "active" if int(expires_at) > now_ts() else "expired"
-    item["last_manual_set_at"] = now_ts()
-    item["last_renew_order_code"] = order_code
-    item["delivered_by"] = delivered_by
+    if account_data:
+        existing_account = item.get("account", {}) or {}
+        item["account"] = {**existing_account, **account_data}
 
     customers[key]["products"][item_index] = item
     save_customers(customers)
@@ -1388,7 +1393,6 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
         "base_monthly_price": int(CATALOG[product_code]["price"]),
         "discount_percent": int(get_term_discount(months) * 100),
         "duration_days": duration_days,
-        "renewal_item_index": renewal_item_index,
         "status": "waiting_payment",
         "created_at": now_ts(),
     }
@@ -1406,61 +1410,43 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
     item = CATALOG[product_code]
     account_data = None
     message = ""
-    is_renewal = order.get("renewal_item_index") is not None
 
-    if not is_renewal:
-        if item["type"] == "shared":
-            account_data = allocate_inventory_account(product_code)
-            if account_data:
-                message = (
-                    "✅ Thanh toán đã được xác nhận.\n\n"
-                    f"Tài khoản: {account_data.get('username', '')}\n"
-                    f"Mật khẩu: {account_data.get('password', '')}\n"
-                )
-                if account_data.get("note"):
-                    message += f"Ghi chú: {account_data['note']}\n"
-                if account_data.get("username"):
-                    message += "\nBạn có thể vào mục 🔐 Lấy mã 2FA khi cần."
-            else:
-                message = (
-                    "✅ Thanh toán đã được xác nhận.\n"
-                    "Hiện kho tài khoản dùng chung đang tạm hết, admin sẽ cấp thủ công sớm nhất."
-                )
+    if item["type"] == "shared":
+        account_data = allocate_inventory_account(product_code)
+        if account_data:
+            message = (
+                "✅ Thanh toán đã được xác nhận.\n\n"
+                f"Tài khoản: {account_data.get('username', '')}\n"
+                f"Mật khẩu: {account_data.get('password', '')}\n"
+            )
+            if account_data.get("note"):
+                message += f"Ghi chú: {account_data['note']}\n"
+            if account_data.get("username"):
+                message += "\nBạn có thể vào mục 🔐 Lấy mã 2FA khi cần."
         else:
             message = (
                 "✅ Thanh toán đã được xác nhận.\n"
-                "Admin sẽ cấp tài khoản riêng cho bạn. Sau khi cấp xong, bot vẫn quản lý hạn dùng và 2FA bình thường."
+                "Hiện kho tài khoản dùng chung đang tạm hết, admin sẽ cấp thủ công sớm nhất."
             )
+    else:
+        message = (
+            "✅ Thanh toán đã được xác nhận.\n"
+            "Admin sẽ cấp tài khoản riêng cho bạn. Sau khi cấp xong, bot vẫn quản lý hạn dùng và 2FA bình thường."
+        )
 
     if order.get("coupon_code"):
         apply_coupon_usage(order["coupon_code"], int(order["user_id"]))
 
-    if is_renewal:
-        record = extend_customer_product(
-            user_id=int(order["user_id"]),
-            item_index=int(order["renewal_item_index"]),
-            duration_days=int(order["duration_days"]),
-            order_code=order_code,
-            delivered_by=delivered_by,
-        )
-        if account_data:
-            record["account"] = record.get("account") or account_data
-        message = (
-            "✅ Thanh toán gia hạn đã được xác nhận.\n\n"
-            f"Gói: {record.get('product_name', CATALOG[product_code]['name'])}\n"
-            f"Hết hạn mới: {format_expiry(int(record['expires_at']))}"
-        )
-    else:
-        record = add_customer_product(
-            user_id=order["user_id"],
-            username=order.get("username", ""),
-            full_name=order.get("full_name", ""),
-            product_code=product_code,
-            account_data=account_data,
-            duration_days=int(order["duration_days"]),
-            order_code=order_code,
-            delivered_by=delivered_by,
-        )
+    add_customer_product(
+        user_id=order["user_id"],
+        username=order.get("username", ""),
+        full_name=order.get("full_name", ""),
+        product_code=product_code,
+        account_data=account_data,
+        duration_days=int(order["duration_days"]),
+        order_code=order_code,
+        delivered_by=delivered_by,
+    )
 
     all_orders = get_orders()
     all_orders[order_code] = {
@@ -1489,12 +1475,10 @@ def is_admin(user_id: int) -> bool:
 def admin_help() -> str:
     return (
         "🛠 Lệnh admin:\n\n"
-        "/addstock <product_code> <username> <password> [account_key] [note]\n"
+        "/addstock <product_code> <username> <password> [note]\n"
         "/addsecret <username> <base32_secret>\n"
         "/delsecret <username>\n"
         "/grant <user_id> <product_code> <days> <username> <password>\n"
-        "/extend <user_id> <item_index> <days>\n"
-        "/setexpiry <user_id> <item_index> <yyyy-mm-dd hh:mm>\n"
         "/setprice <product_code> <price>\n"
         "/orders\n"
         "/inventory\n"
@@ -1867,64 +1851,6 @@ def handle_callback(cq: Dict[str, Any]):
             product_detail_text(code, months, coupon_code=coupon_code, user_id=user_id),
             reply_markup=confirm_buy_keyboard(code, months, has_coupon=bool(coupon_code)),
         )
-        return
-    if data.startswith("renew|"):
-        try:
-            item_index = int(data.split("|", 1)[1])
-        except ValueError:
-            tg_send_message(chat_id, "❌ Dữ liệu gia hạn không hợp lệ.")
-            return
-        tg_edit_message(chat_id, message_id, "🔄 Chọn thời hạn cần gia hạn:", reply_markup=renew_term_menu_keyboard(user_id, item_index))
-        return
-    if data.startswith("renew_term|"):
-        _, item_index_raw, months_raw = data.split("|", 2)
-        item_index = int(item_index_raw)
-        months = int(months_raw)
-        items = customer_all_items(user_id)
-        if item_index < 0 or item_index >= len(items):
-            tg_send_message(chat_id, "❌ Không tìm thấy gói cần gia hạn.")
-            return
-        item = items[item_index]
-        text = (
-            f"🔄 Gia hạn gói: {item.get('product_name', '')}\n"
-            f"Thời hạn chọn: {term_label(months)} ({get_duration_days_for_months(months)} ngày)\n"
-            f"Giá thanh toán: {format_money(get_product_price(item['product_code'], months))}\n"
-            f"Hết hạn hiện tại: {format_expiry(int(item.get('expires_at', 0)))}"
-        )
-        tg_edit_message(chat_id, message_id, text, reply_markup=renew_confirm_keyboard(item_index, months))
-        return
-    if data.startswith("renew_pay|"):
-        _, item_index_raw, months_raw = data.split("|", 2)
-        item_index = int(item_index_raw)
-        months = int(months_raw)
-        items = customer_all_items(user_id)
-        if item_index < 0 or item_index >= len(items):
-            tg_send_message(chat_id, "❌ Không tìm thấy gói cần gia hạn.")
-            return
-        item = items[item_index]
-        product_code = item.get("product_code")
-        order = create_pending_order(
-            user_id,
-            chat_id,
-            username,
-            full_name,
-            product_code,
-            months,
-            renewal_item_index=item_index,
-        )
-        qr_url = generate_qr(order["price"], order["order_code"])
-        caption = (
-            f"🧾 Mã đơn gia hạn: {order['order_code']}\n"
-            f"Gói: {item.get('product_name', CATALOG[product_code]['name'])}\n"
-            f"Thời hạn cộng thêm: {term_label(months)} ({order['duration_days']} ngày)\n"
-            f"Hết hạn hiện tại: {format_expiry(int(item.get('expires_at', 0)))}\n"
-            f"Số tiền cần thanh toán: {format_money(order['price'])}\n\n"
-            "1. Quét QR để thanh toán\n"
-            "2. Chuyển đúng nội dung\n"
-            "3. Bấm 'Tôi đã chuyển khoản'\n"
-            "4. Sau xác nhận, bot sẽ cộng thêm ngày vào đúng gói cũ"
-        )
-        tg_send_photo(chat_id, qr_url, caption=caption, reply_markup=payment_confirm_keyboard(order["order_code"]))
         return
     if data.startswith("coupon_input|"):
         _, code, months_raw = data.split("|", 2)
