@@ -45,6 +45,7 @@ ORDERS_FILE = "orders.json"
 PENDING_ORDERS_FILE = "pending_orders.json"
 REMINDER_LOG_FILE = "reminder_log.json"
 FREE_REQUESTS_FILE = "free_requests.json"
+COUPONS_FILE = "coupons.json"
 
 # ============================================================
 # CATALOG / DEFAULT CONFIG
@@ -232,9 +233,70 @@ def ensure_bootstrap_files() -> None:
         (PENDING_ORDERS_FILE, {}),
         (REMINDER_LOG_FILE, {}),
         (FREE_REQUESTS_FILE, {}),
+        (COUPONS_FILE, default_coupons()),
     ]:
         if load_gist_json(filename, None) is None:
             save_gist_json(filename, default)
+
+
+# ============================================================
+# COUPON HELPERS
+# ============================================================
+def default_coupons() -> Dict[str, Any]:
+    return {
+        "NEW20": {
+            "code": "NEW20",
+            "type": "percent",
+            "value": 20,
+            "active": True,
+            "description": "Giảm 20%",
+        }
+    }
+
+
+def get_coupons() -> Dict[str, Any]:
+    coupons = load_gist_json(COUPONS_FILE, default_coupons())
+    if not isinstance(coupons, dict):
+        return default_coupons()
+    for code, info in default_coupons().items():
+        coupons.setdefault(code, info)
+    return coupons
+
+
+def save_coupons(data: Dict[str, Any]):
+    save_gist_json(COUPONS_FILE, data)
+
+
+def normalize_coupon_code(code: str) -> str:
+    return (code or "").strip().upper()
+
+
+def get_coupon_info(coupon_code: str) -> Optional[Dict[str, Any]]:
+    code = normalize_coupon_code(coupon_code)
+    if not code:
+        return None
+    coupon = get_coupons().get(code)
+    if not coupon or not bool(coupon.get("active", False)):
+        return None
+    if coupon.get("type") != "percent":
+        return None
+    value = int(coupon.get("value", 0) or 0)
+    if value <= 0:
+        return None
+    return {**coupon, "code": code, "value": value}
+
+
+def get_coupon_discount_amount(price: int, coupon_code: str = "") -> int:
+    coupon = get_coupon_info(coupon_code)
+    if not coupon:
+        return 0
+    discount_amount = int(round(int(price) * coupon["value"] / 100.0))
+    return max(min(discount_amount, int(price)), 0)
+
+
+def get_price_after_coupon(product_code: str, months: int = 1, coupon_code: str = "") -> int:
+    original_price = get_product_price(product_code, months)
+    return max(original_price - get_coupon_discount_amount(original_price, coupon_code), 0)
 
 
 # ============================================================
@@ -627,37 +689,23 @@ def get_duration_days_for_months(months: int) -> int:
     return int(months) * 30
 
 
-def user_has_completed_purchase(user_id: int) -> bool:
-    customers = get_customers().get(str(user_id), {})
-    if customers.get("products"):
-        return True
-
-    orders = get_orders()
-    for order in orders.values():
-        if int(order.get("user_id", 0)) == int(user_id) and order.get("status") == "paid":
-            return True
-    return False
-
-
-def get_first_purchase_discount_rate(user_id: int) -> float:
-    return 0.20 if not user_has_completed_purchase(user_id) else 0.0
-
-
-def get_first_purchase_discount_amount(user_id: int, product_code: str, months: int = 1) -> int:
-    base_total = get_product_price(product_code, months)
-    return int(round(base_total * get_first_purchase_discount_rate(user_id)))
-
-
-def get_user_product_price(user_id: int, product_code: str, months: int = 1, is_renewal: bool = False) -> int:
-    base_total = get_product_price(product_code, months)
-    if is_renewal:
-        return base_total
-    discount_amount = get_first_purchase_discount_amount(user_id, product_code, months)
-    return max(base_total - discount_amount, 0)
-
-
 def term_label(months: int) -> str:
     return f"{months} tháng"
+
+
+def build_price_summary(product_code: str, months: int = 1, coupon_code: str = "") -> str:
+    original_price = get_product_price(product_code, months)
+    coupon = get_coupon_info(coupon_code)
+    if not coupon:
+        return f"Giá thanh toán: {format_money(original_price)}"
+    discount_amount = get_coupon_discount_amount(original_price, coupon_code)
+    final_price = max(original_price - discount_amount, 0)
+    return (
+        f"Giá gốc: {format_money(original_price)}\n"
+        f"Mã giảm giá: {coupon['code']} (-{coupon['value']}%)\n"
+        f"Tiết kiệm: {format_money(discount_amount)}\n"
+        f"Giá thanh toán: {format_money(final_price)}"
+    )
 
 
 def customer_active_items(user_id: int) -> List[Dict[str, Any]]:
@@ -936,10 +984,13 @@ def term_menu_keyboard(product_code: str):
     return {"inline_keyboard": rows}
 
 
-def confirm_buy_keyboard(product_code: str, months: int):
+def confirm_buy_keyboard(product_code: str, months: int, coupon_code: str = ""):
+    coupon = get_coupon_info(coupon_code)
+    coupon_label = f"🎟 Đổi mã ({coupon['code']})" if coupon else "🎟 Nhập mã giảm giá"
     return {
         "inline_keyboard": [
-            [{"text": "💳 Thanh toán", "callback_data": f"pay|{product_code}|{months}"}],
+            [{"text": coupon_label, "callback_data": f"apply_coupon|buy|{product_code}|{months}"}],
+            [{"text": "💳 Thanh toán", "callback_data": f"pay|{product_code}|{months}|{normalize_coupon_code(coupon_code)}"}],
             [{"text": "⬅️ Chọn thời hạn khác", "callback_data": f"buy|{product_code}"}],
         ]
     }
@@ -1139,12 +1190,15 @@ def free_gift_confirm_keyboard(gift_code: str):
 # ============================================================
 # ORDER PROCESSING
 # ============================================================
-def create_pending_order(user_id: int, chat_id: int, username: str, full_name: str, product_code: str, months: int = 1) -> Dict[str, Any]:
+def create_pending_order(user_id: int, chat_id: int, username: str, full_name: str, product_code: str, months: int = 1,
+                         coupon_code: str = "") -> Dict[str, Any]:
     orders = get_pending_orders()
     order_code = make_payment_code(product_code, user_id)
-    base_price = get_product_price(product_code, months)
-    first_purchase_discount_amount = get_first_purchase_discount_amount(user_id, product_code, months)
-    price = get_user_product_price(user_id, product_code, months)
+    normalized_coupon = normalize_coupon_code(coupon_code)
+    original_price = get_product_price(product_code, months)
+    coupon = get_coupon_info(normalized_coupon)
+    coupon_discount = get_coupon_discount_amount(original_price, normalized_coupon)
+    price = max(original_price - coupon_discount, 0)
     duration_days = get_duration_days_for_months(months)
     orders[order_code] = {
         "order_code": order_code,
@@ -1155,9 +1209,10 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
         "product_code": product_code,
         "months": months,
         "price": price,
-        "original_price": base_price,
-        "first_purchase_discount_amount": first_purchase_discount_amount,
-        "first_purchase_discount_percent": 20 if first_purchase_discount_amount > 0 else 0,
+        "original_price": original_price,
+        "coupon_code": coupon.get("code", "") if coupon else "",
+        "coupon_percent": int(coupon.get("value", 0) or 0) if coupon else 0,
+        "coupon_discount": coupon_discount,
         "base_monthly_price": int(CATALOG[product_code]["price"]),
         "discount_percent": int(get_term_discount(months) * 100),
         "duration_days": duration_days,
@@ -1236,23 +1291,24 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
 def is_admin(user_id: int) -> bool:
     return bool(ADMIN_CHAT_ID and user_id == ADMIN_CHAT_ID)
 
-
 def admin_help() -> str:
-    return (
-        "🛠 Lệnh admin:\n\n"
-        "/addstock <product_code> <username> <password> [note]\n"
-        "/addsecret <username> <base32_secret>\n"
-        "/delsecret <username>\n"
-        "/grant <user_id> <product_code> <days> <username> <password>\n"
-        "/setprice <product_code> <price>\n"
-        "/orders\n"
-        "/inventory\n"
-        "/products\n"
-        "/checkstock [product_code]\n"
-        "/free_requests\n"
-        "/remindnow\n"
-        "/broadcast <message>"
-    )
+    return "\n".join([
+        "🛠 Lệnh admin:",
+        "",
+        "/addstock <product_code> <username> <password> [note]",
+        "/addsecret <username> <base32_secret>",
+        "/delsecret <username>",
+        "/grant <user_id> <product_code> <days> <username> <password>",
+        "/setprice <product_code> <price>",
+        "/orders",
+        "/inventory",
+        "/products",
+        "/checkstock [product_code]",
+        "/free_requests",
+        "/remindnow",
+        "/broadcast <message>",
+        "/coupons",
+    ])
 
 
 def handle_admin_command(chat_id: int, user_id: int, text: str):
@@ -1534,12 +1590,22 @@ def handle_callback(cq: Dict[str, Any]):
         return
     if data.startswith("buy|"):
         code = data.split("|", 1)[1]
-        tg_edit_message(chat_id, message_id, product_detail_text(code, user_id=user_id), reply_markup=term_menu_keyboard(code))
+        tg_edit_message(chat_id, message_id, product_detail_text(code), reply_markup=term_menu_keyboard(code))
         return
     if data.startswith("term|"):
         _, code, months_raw = data.split("|", 2)
         months = int(months_raw)
-        tg_edit_message(chat_id, message_id, product_detail_text(code, months, user_id=user_id), reply_markup=confirm_buy_keyboard(code, months))
+        tg_edit_message(chat_id, message_id, product_detail_text(code, months), reply_markup=confirm_buy_keyboard(code, months))
+        return
+    if data.startswith("apply_coupon|buy|"):
+        _, _, product_code, months_raw = data.split("|", 3)
+        USER_STATE[user_id] = {
+            "awaiting_coupon": True,
+            "coupon_target": "buy",
+            "product_code": product_code,
+            "months": int(months_raw),
+        }
+        tg_send_message(chat_id, "🎟 Vui lòng nhập mã giảm giá của bạn. Ví dụ: NEW20")
         return
     if data.startswith("pay|"):
         _, code, months_raw = data.split("|", 2)
@@ -1705,7 +1771,7 @@ def handle_text_message(message: Dict[str, Any]):
     if text.startswith((
         "/admin", "/addstock", "/addsecret", "/delsecret", "/grant",
         "/setprice", "/inventory", "/orders", "/products",
-        "/checkstock", "/remindnow", "/free_requests", "/broadcast"
+        "/checkstock", "/remindnow", "/free_requests", "/broadcast", "/coupons"
     )):
         handle_admin_command(chat_id, user_id, text)
         return
