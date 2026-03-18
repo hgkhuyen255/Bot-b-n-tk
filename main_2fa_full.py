@@ -233,70 +233,10 @@ def ensure_bootstrap_files() -> None:
         (PENDING_ORDERS_FILE, {}),
         (REMINDER_LOG_FILE, {}),
         (FREE_REQUESTS_FILE, {}),
-        (COUPONS_FILE, default_coupons()),
+        (COUPONS_FILE, {}),
     ]:
         if load_gist_json(filename, None) is None:
             save_gist_json(filename, default)
-
-
-# ============================================================
-# COUPON HELPERS
-# ============================================================
-def default_coupons() -> Dict[str, Any]:
-    return {
-        "NEW20": {
-            "code": "NEW20",
-            "type": "percent",
-            "value": 20,
-            "active": True,
-            "description": "Giảm 20%",
-        }
-    }
-
-
-def get_coupons() -> Dict[str, Any]:
-    coupons = load_gist_json(COUPONS_FILE, default_coupons())
-    if not isinstance(coupons, dict):
-        return default_coupons()
-    for code, info in default_coupons().items():
-        coupons.setdefault(code, info)
-    return coupons
-
-
-def save_coupons(data: Dict[str, Any]):
-    save_gist_json(COUPONS_FILE, data)
-
-
-def normalize_coupon_code(code: str) -> str:
-    return (code or "").strip().upper()
-
-
-def get_coupon_info(coupon_code: str) -> Optional[Dict[str, Any]]:
-    code = normalize_coupon_code(coupon_code)
-    if not code:
-        return None
-    coupon = get_coupons().get(code)
-    if not coupon or not bool(coupon.get("active", False)):
-        return None
-    if coupon.get("type") != "percent":
-        return None
-    value = int(coupon.get("value", 0) or 0)
-    if value <= 0:
-        return None
-    return {**coupon, "code": code, "value": value}
-
-
-def get_coupon_discount_amount(price: int, coupon_code: str = "") -> int:
-    coupon = get_coupon_info(coupon_code)
-    if not coupon:
-        return 0
-    discount_amount = int(round(int(price) * coupon["value"] / 100.0))
-    return max(min(discount_amount, int(price)), 0)
-
-
-def get_price_after_coupon(product_code: str, months: int = 1, coupon_code: str = "") -> int:
-    original_price = get_product_price(product_code, months)
-    return max(original_price - get_coupon_discount_amount(original_price, coupon_code), 0)
 
 
 # ============================================================
@@ -516,6 +456,153 @@ def account_summary_text(user_id: int) -> str:
         f"Link / mã mời: {build_referral_link(user_id)}"
     )
 
+
+# ============================================================
+# COUPON HELPERS
+# ============================================================
+def get_coupons() -> Dict[str, Any]:
+    return load_gist_json(COUPONS_FILE, {})
+
+
+def save_coupons(data: Dict[str, Any]):
+    save_gist_json(COUPONS_FILE, data)
+
+
+def normalize_coupon_code(code: str) -> str:
+    return (code or "").strip().upper()
+
+
+def coupon_usage_key(user_id: int) -> str:
+    return str(int(user_id))
+
+
+def get_coupon_user_used(coupon: Dict[str, Any], user_id: int) -> int:
+    usage = coupon.get("used_by_users", {}) or {}
+    return int(usage.get(coupon_usage_key(user_id), 0) or 0)
+
+
+def coupon_is_active(coupon: Dict[str, Any]) -> bool:
+    return bool(coupon.get("active", True))
+
+
+def coupon_matches_product(coupon: Dict[str, Any], product_code: str) -> bool:
+    allowed = coupon.get("product_codes", []) or []
+    return (not allowed) or (product_code in allowed)
+
+
+def calculate_coupon_discount(subtotal: int, coupon: Dict[str, Any]) -> int:
+    discount_type = (coupon.get("discount_type") or "percent").lower()
+    discount_value = int(coupon.get("discount_value", 0) or 0)
+    if subtotal <= 0 or discount_value <= 0:
+        return 0
+    if discount_type == "fixed":
+        return min(subtotal, discount_value)
+    return min(subtotal, int(round(subtotal * discount_value / 100.0)))
+
+
+def validate_coupon_for_user(coupon_code: str, user_id: int, product_code: str, subtotal: int) -> Dict[str, Any]:
+    coupons = get_coupons()
+    code = normalize_coupon_code(coupon_code)
+    coupon = coupons.get(code)
+    if not coupon:
+        return {"ok": False, "message": "❌ Mã giảm giá không tồn tại."}
+    if not coupon_is_active(coupon):
+        return {"ok": False, "message": "❌ Mã giảm giá này đã tắt."}
+    if not coupon_matches_product(coupon, product_code):
+        return {"ok": False, "message": "❌ Mã này không áp dụng cho gói đã chọn."}
+
+    max_total = int(coupon.get("max_uses_total", 0) or 0)
+    used_total = int(coupon.get("used_total", 0) or 0)
+    if max_total > 0 and used_total >= max_total:
+        return {"ok": False, "message": "❌ Mã giảm giá đã hết lượt sử dụng."}
+
+    max_per_user = int(coupon.get("max_uses_per_user", 0) or 0)
+    used_by_user = get_coupon_user_used(coupon, user_id)
+    if max_per_user > 0 and used_by_user >= max_per_user:
+        return {"ok": False, "message": "❌ Bạn đã dùng hết số lượt cho mã này."}
+
+    discount_amount = calculate_coupon_discount(subtotal, coupon)
+    if discount_amount <= 0:
+        return {"ok": False, "message": "❌ Mã giảm giá không hợp lệ."}
+
+    return {
+        "ok": True,
+        "coupon_code": code,
+        "coupon": coupon,
+        "discount_amount": discount_amount,
+        "final_price": max(0, subtotal - discount_amount),
+        "used_by_user": used_by_user,
+    }
+
+
+def apply_coupon_usage(coupon_code: str, user_id: int) -> None:
+    coupons = get_coupons()
+    code = normalize_coupon_code(coupon_code)
+    coupon = coupons.get(code)
+    if not coupon:
+        return
+    coupon["used_total"] = int(coupon.get("used_total", 0) or 0) + 1
+    usage = coupon.get("used_by_users", {}) or {}
+    key = coupon_usage_key(user_id)
+    usage[key] = int(usage.get(key, 0) or 0) + 1
+    coupon["used_by_users"] = usage
+    coupon["updated_at"] = now_ts()
+    coupons[code] = coupon
+    save_coupons(coupons)
+
+
+def create_coupon(code: str, discount_type: str, discount_value: int,
+                  max_uses_total: int = 0, max_uses_per_user: int = 1,
+                  product_codes: Optional[List[str]] = None, active: bool = True) -> Dict[str, Any]:
+    coupons = get_coupons()
+    clean_code = normalize_coupon_code(code)
+    coupon = {
+        "code": clean_code,
+        "discount_type": (discount_type or "percent").lower(),
+        "discount_value": int(discount_value),
+        "max_uses_total": max(0, int(max_uses_total)),
+        "max_uses_per_user": max(0, int(max_uses_per_user)),
+        "product_codes": product_codes or [],
+        "active": bool(active),
+        "used_total": int(coupons.get(clean_code, {}).get("used_total", 0) or 0),
+        "used_by_users": coupons.get(clean_code, {}).get("used_by_users", {}) or {},
+        "created_at": coupons.get(clean_code, {}).get("created_at", now_ts()),
+        "updated_at": now_ts(),
+    }
+    coupons[clean_code] = coupon
+    save_coupons(coupons)
+    return coupon
+
+
+def set_coupon_active(code: str, active: bool) -> Optional[Dict[str, Any]]:
+    coupons = get_coupons()
+    clean_code = normalize_coupon_code(code)
+    coupon = coupons.get(clean_code)
+    if not coupon:
+        return None
+    coupon["active"] = bool(active)
+    coupon["updated_at"] = now_ts()
+    coupons[clean_code] = coupon
+    save_coupons(coupons)
+    return coupon
+
+
+def format_coupon_brief(coupon: Dict[str, Any]) -> str:
+    code = coupon.get("code", "")
+    dtype = coupon.get("discount_type", "percent")
+    dvalue = int(coupon.get("discount_value", 0) or 0)
+    discount_label = f"{dvalue}%" if dtype == "percent" else format_money(dvalue)
+    total_limit = int(coupon.get("max_uses_total", 0) or 0)
+    per_user_limit = int(coupon.get("max_uses_per_user", 0) or 0)
+    total_text = "∞" if total_limit <= 0 else str(total_limit)
+    per_user_text = "∞" if per_user_limit <= 0 else str(per_user_limit)
+    status = "Bật" if coupon.get("active", True) else "Tắt"
+    scope = ",".join(coupon.get("product_codes", []) or []) or "all"
+    return (
+        f"- {code} | giảm {discount_label} | tổng: {coupon.get('used_total', 0)}/{total_text} | "
+        f"user: {per_user_text} | phạm vi: {scope} | {status}"
+    )
+
 # ============================================================
 # TELEGRAM HELPERS
 # ============================================================
@@ -677,12 +764,21 @@ def get_term_discount(months: int) -> float:
     return float(TERM_DISCOUNTS.get(months, 0.0))
 
 
-def get_product_price(product_code: str, months: int = 1) -> int:
+def get_product_base_price(product_code: str, months: int = 1) -> int:
     base_price = int(CATALOG[product_code]["price"])
     subtotal = base_price * months
     discount = get_term_discount(months)
     final_price = int(round(subtotal * (1 - discount)))
     return max(final_price, 0)
+
+
+def get_product_price(product_code: str, months: int = 1, coupon_code: str = "", user_id: Optional[int] = None) -> int:
+    subtotal = get_product_base_price(product_code, months)
+    if coupon_code and user_id is not None:
+        result = validate_coupon_for_user(coupon_code, user_id, product_code, subtotal)
+        if result.get("ok"):
+            return int(result["final_price"])
+    return subtotal
 
 
 def get_duration_days_for_months(months: int) -> int:
@@ -691,21 +787,6 @@ def get_duration_days_for_months(months: int) -> int:
 
 def term_label(months: int) -> str:
     return f"{months} tháng"
-
-
-def build_price_summary(product_code: str, months: int = 1, coupon_code: str = "") -> str:
-    original_price = get_product_price(product_code, months)
-    coupon = get_coupon_info(coupon_code)
-    if not coupon:
-        return f"Giá thanh toán: {format_money(original_price)}"
-    discount_amount = get_coupon_discount_amount(original_price, coupon_code)
-    final_price = max(original_price - discount_amount, 0)
-    return (
-        f"Giá gốc: {format_money(original_price)}\n"
-        f"Mã giảm giá: {coupon['code']} (-{coupon['value']}%)\n"
-        f"Tiết kiệm: {format_money(discount_amount)}\n"
-        f"Giá thanh toán: {format_money(final_price)}"
-    )
 
 
 def customer_active_items(user_id: int) -> List[Dict[str, Any]]:
@@ -984,13 +1065,12 @@ def term_menu_keyboard(product_code: str):
     return {"inline_keyboard": rows}
 
 
-def confirm_buy_keyboard(product_code: str, months: int, coupon_code: str = ""):
-    coupon = get_coupon_info(coupon_code)
-    coupon_label = f"🎟 Đổi mã ({coupon['code']})" if coupon else "🎟 Nhập mã giảm giá"
+def confirm_buy_keyboard(product_code: str, months: int, has_coupon: bool = False):
+    coupon_label = "🎟 Đổi mã giảm giá khác" if has_coupon else "🎟 Nhập mã giảm giá"
     return {
         "inline_keyboard": [
-            [{"text": coupon_label, "callback_data": f"apply_coupon|buy|{product_code}|{months}"}],
-            [{"text": "💳 Thanh toán", "callback_data": f"pay|{product_code}|{months}|{normalize_coupon_code(coupon_code)}"}],
+            [{"text": coupon_label, "callback_data": f"coupon_input|{product_code}|{months}"}],
+            [{"text": "💳 Thanh toán", "callback_data": f"pay|{product_code}|{months}"}],
             [{"text": "⬅️ Chọn thời hạn khác", "callback_data": f"buy|{product_code}"}],
         ]
     }
@@ -1101,21 +1181,35 @@ def home_text() -> str:
     )
 
 
-def product_detail_text(product_code: str, months: int = 1) -> str:
+def product_detail_text(product_code: str, months: int = 1, coupon_code: str = "", user_id: Optional[int] = None) -> str:
     item = CATALOG[product_code]
     type_vi = "Tài khoản dùng chung" if item["type"] == "shared" else "Tài khoản cấp riêng"
-    total_price = get_product_price(product_code, months)
+    subtotal = get_product_base_price(product_code, months)
+    total_price = subtotal
+    coupon_text = "Chưa áp dụng"
+    if coupon_code and user_id is not None:
+        coupon_result = validate_coupon_for_user(coupon_code, user_id, product_code, subtotal)
+        if coupon_result.get("ok"):
+            total_price = int(coupon_result["final_price"])
+            coupon_text = f"{coupon_result['coupon_code']} (-{format_money(coupon_result['discount_amount'])})"
+        else:
+            coupon_text = f"{normalize_coupon_code(coupon_code)} (không hợp lệ)"
     duration_days = get_duration_days_for_months(months)
-    return (
-        f"📦 {item['name']}\n\n"
-        f"Nền tảng: {item['platform']}\n"
-        f"Loại: {type_vi}\n"
-        f"Thời hạn đang chọn: {term_label(months)} ({duration_days} ngày)\n"
-        f"Giá thanh toán: {format_money(total_price)}\n"
-        f"Kho hiện tại: {stock_label(product_code)}\n\n"
-        "Sau khi thanh toán và được xác nhận, bot sẽ cấp tài khoản hoặc ghi nhận để admin cấp riêng.\n"
-        "Mã 2FA chỉ lấy được khi gói còn hạn."
-    )
+    lines = [
+        f"📦 {item['name']}",
+        "",
+        f"Nền tảng: {item['platform']}",
+        f"Loại: {type_vi}",
+        f"Thời hạn đang chọn: {term_label(months)} ({duration_days} ngày)",
+        f"Giá gốc theo kỳ hạn: {format_money(subtotal)}",
+        f"Mã giảm giá: {coupon_text}",
+        f"Giá thanh toán: {format_money(total_price)}",
+        f"Kho hiện tại: {stock_label(product_code)}",
+        "",
+        "Sau khi thanh toán và được xác nhận, bot sẽ cấp tài khoản hoặc ghi nhận để admin cấp riêng.",
+        "Mã 2FA chỉ lấy được khi gói còn hạn.",
+    ]
+    return "\n".join(lines)
 
 
 def my_products_text(user_id: int) -> str:
@@ -1190,15 +1284,20 @@ def free_gift_confirm_keyboard(gift_code: str):
 # ============================================================
 # ORDER PROCESSING
 # ============================================================
-def create_pending_order(user_id: int, chat_id: int, username: str, full_name: str, product_code: str, months: int = 1,
-                         coupon_code: str = "") -> Dict[str, Any]:
+def create_pending_order(user_id: int, chat_id: int, username: str, full_name: str,
+                         product_code: str, months: int = 1, coupon_code: str = "") -> Dict[str, Any]:
     orders = get_pending_orders()
     order_code = make_payment_code(product_code, user_id)
-    normalized_coupon = normalize_coupon_code(coupon_code)
-    original_price = get_product_price(product_code, months)
-    coupon = get_coupon_info(normalized_coupon)
-    coupon_discount = get_coupon_discount_amount(original_price, normalized_coupon)
-    price = max(original_price - coupon_discount, 0)
+    base_price = get_product_base_price(product_code, months)
+    coupon_result = None
+    final_price = base_price
+    clean_coupon = normalize_coupon_code(coupon_code)
+    if clean_coupon:
+        coupon_result = validate_coupon_for_user(clean_coupon, user_id, product_code, base_price)
+        if coupon_result.get("ok"):
+            final_price = int(coupon_result["final_price"])
+        else:
+            clean_coupon = ""
     duration_days = get_duration_days_for_months(months)
     orders[order_code] = {
         "order_code": order_code,
@@ -1208,11 +1307,10 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
         "full_name": full_name,
         "product_code": product_code,
         "months": months,
-        "price": price,
-        "original_price": original_price,
-        "coupon_code": coupon.get("code", "") if coupon else "",
-        "coupon_percent": int(coupon.get("value", 0) or 0) if coupon else 0,
-        "coupon_discount": coupon_discount,
+        "price": final_price,
+        "base_price": base_price,
+        "coupon_code": clean_coupon,
+        "coupon_discount": int(coupon_result["discount_amount"]) if coupon_result and coupon_result.get("ok") else 0,
         "base_monthly_price": int(CATALOG[product_code]["price"]),
         "discount_percent": int(get_term_discount(months) * 100),
         "duration_days": duration_days,
@@ -1257,6 +1355,9 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
             "Admin sẽ cấp tài khoản riêng cho bạn. Sau khi cấp xong, bot vẫn quản lý hạn dùng và 2FA bình thường."
         )
 
+    if order.get("coupon_code"):
+        apply_coupon_usage(order["coupon_code"], int(order["user_id"]))
+
     add_customer_product(
         user_id=order["user_id"],
         username=order.get("username", ""),
@@ -1291,24 +1392,27 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
 def is_admin(user_id: int) -> bool:
     return bool(ADMIN_CHAT_ID and user_id == ADMIN_CHAT_ID)
 
+
 def admin_help() -> str:
-    return "\n".join([
-        "🛠 Lệnh admin:",
-        "",
-        "/addstock <product_code> <username> <password> [note]",
-        "/addsecret <username> <base32_secret>",
-        "/delsecret <username>",
-        "/grant <user_id> <product_code> <days> <username> <password>",
-        "/setprice <product_code> <price>",
-        "/orders",
-        "/inventory",
-        "/products",
-        "/checkstock [product_code]",
-        "/free_requests",
-        "/remindnow",
-        "/broadcast <message>",
-        "/coupons",
-    ])
+    return (
+        "🛠 Lệnh admin:\n\n"
+        "/addstock <product_code> <username> <password> [note]\n"
+        "/addsecret <username> <base32_secret>\n"
+        "/delsecret <username>\n"
+        "/grant <user_id> <product_code> <days> <username> <password>\n"
+        "/setprice <product_code> <price>\n"
+        "/orders\n"
+        "/inventory\n"
+        "/products\n"
+        "/checkstock [product_code]\n"
+        "/free_requests\n"
+        "/remindnow\n"
+        "/broadcast <message>\n"
+        "/addcoupon <code> <percent|fixed> <value> <max_total> <max_per_user> [product_code|all,...]\n"
+        "/couponon <code>\n"
+        "/couponoff <code>\n"
+        "/coupons"
+    )
 
 
 def handle_admin_command(chat_id: int, user_id: int, text: str):
@@ -1381,6 +1485,69 @@ def handle_admin_command(chat_id: int, user_id: int, text: str):
         for r in rows[-20:]:
             lines.append(f"- {r['request_code']} | {r['gift_name']} | {r.get('username','')} | {r.get('email','không có email')} | {r['status']}")
         tg_send_message(chat_id, "\n".join(lines))
+        return
+
+    if cmd == "/coupons":
+        coupons = get_coupons()
+        if not coupons:
+            tg_send_message(chat_id, "Chưa có coupon nào.")
+            return
+        lines = ["🎟 Danh sách coupon:"]
+        for coupon in coupons.values():
+            lines.append(format_coupon_brief(coupon))
+        tg_send_message(chat_id, "\n".join(lines))
+        return
+
+    if cmd == "/couponon" and len(parts) >= 2:
+        coupon = set_coupon_active(parts[1], True)
+        if not coupon:
+            tg_send_message(chat_id, "❌ Không tìm thấy coupon.")
+            return
+        tg_send_message(chat_id, f"✅ Đã bật coupon {coupon['code']}.")
+        return
+
+    if cmd == "/couponoff" and len(parts) >= 2:
+        coupon = set_coupon_active(parts[1], False)
+        if not coupon:
+            tg_send_message(chat_id, "❌ Không tìm thấy coupon.")
+            return
+        tg_send_message(chat_id, f"✅ Đã tắt coupon {coupon['code']}.")
+        return
+
+    if cmd == "/addcoupon" and len(parts) >= 6:
+        code = parts[1]
+        discount_type = parts[2].lower()
+        if discount_type not in {"percent", "fixed"}:
+            tg_send_message(chat_id, "❌ discount_type chỉ nhận percent hoặc fixed.")
+            return
+        try:
+            discount_value = int(parts[3])
+            max_total = int(parts[4])
+            max_per_user = int(parts[5])
+        except ValueError:
+            tg_send_message(chat_id, "❌ value / max_total / max_per_user phải là số.")
+            return
+
+        product_codes = []
+        if len(parts) >= 7:
+            raw_scope = parts[6].strip()
+            if raw_scope.lower() != "all":
+                product_codes = [x.strip() for x in raw_scope.split(",") if x.strip()]
+                invalid_codes = [x for x in product_codes if x not in CATALOG]
+                if invalid_codes:
+                    tg_send_message(chat_id, f"❌ product_code không hợp lệ: {', '.join(invalid_codes)}")
+                    return
+
+        coupon = create_coupon(
+            code=code,
+            discount_type=discount_type,
+            discount_value=discount_value,
+            max_uses_total=max_total,
+            max_uses_per_user=max_per_user,
+            product_codes=product_codes,
+            active=True,
+        )
+        tg_send_message(chat_id, f"✅ Đã lưu coupon:\n{format_coupon_brief(coupon)}")
         return
 
     if cmd == "/addsecret" and len(parts) >= 3:
@@ -1590,22 +1757,32 @@ def handle_callback(cq: Dict[str, Any]):
         return
     if data.startswith("buy|"):
         code = data.split("|", 1)[1]
-        tg_edit_message(chat_id, message_id, product_detail_text(code), reply_markup=term_menu_keyboard(code))
+        state = USER_STATE.get(user_id, {})
+        coupon_code = state.get("checkout_coupon_code", "") if state.get("checkout_product_code") == code else ""
+        tg_edit_message(chat_id, message_id, product_detail_text(code, 1, coupon_code=coupon_code, user_id=user_id), reply_markup=term_menu_keyboard(code))
         return
     if data.startswith("term|"):
         _, code, months_raw = data.split("|", 2)
         months = int(months_raw)
-        tg_edit_message(chat_id, message_id, product_detail_text(code, months), reply_markup=confirm_buy_keyboard(code, months))
+        state = USER_STATE.get(user_id, {})
+        coupon_code = state.get("checkout_coupon_code", "") if state.get("checkout_product_code") == code else ""
+        tg_edit_message(
+            chat_id,
+            message_id,
+            product_detail_text(code, months, coupon_code=coupon_code, user_id=user_id),
+            reply_markup=confirm_buy_keyboard(code, months, has_coupon=bool(coupon_code)),
+        )
         return
-    if data.startswith("apply_coupon|buy|"):
-        _, _, product_code, months_raw = data.split("|", 3)
+    if data.startswith("coupon_input|"):
+        _, code, months_raw = data.split("|", 2)
+        months = int(months_raw)
         USER_STATE[user_id] = {
-            "awaiting_coupon": True,
-            "coupon_target": "buy",
-            "product_code": product_code,
-            "months": int(months_raw),
+            **USER_STATE.get(user_id, {}),
+            "awaiting_coupon_code": True,
+            "checkout_product_code": code,
+            "checkout_months": months,
         }
-        tg_send_message(chat_id, "🎟 Vui lòng nhập mã giảm giá của bạn. Ví dụ: NEW20")
+        tg_send_message(chat_id, "🎟 Vui lòng nhập mã giảm giá để áp dụng trước khi thanh toán.")
         return
     if data.startswith("pay|"):
         _, code, months_raw = data.split("|", 2)
@@ -1613,20 +1790,38 @@ def handle_callback(cq: Dict[str, Any]):
         if CATALOG[code]["type"] == "shared" and not is_in_stock(code):
             tg_send_message(chat_id, "⚠️ Sản phẩm này hiện đã hết kho, vui lòng chọn gói khác hoặc liên hệ admin.")
             return
-        order = create_pending_order(user_id, chat_id, username, full_name, code, months)
+        state = USER_STATE.get(user_id, {})
+        coupon_code = ""
+        if state.get("checkout_product_code") == code and int(state.get("checkout_months", 0) or 0) == months:
+            coupon_code = state.get("checkout_coupon_code", "")
+        order = create_pending_order(user_id, chat_id, username, full_name, code, months, coupon_code=coupon_code)
         qr_url = generate_qr(order["price"], order["order_code"])
+        coupon_line = ""
+        if order.get("coupon_code"):
+            coupon_line = (
+                f"Mã giảm giá: {order['coupon_code']}\n"
+                f"Giảm: {format_money(int(order.get('coupon_discount', 0)))}\n"
+            )
         caption = (
             f"🧾 Mã đơn: {order['order_code']}\n"
             f"Gói: {CATALOG[code]['name']}\n"
             f"Thời hạn: {term_label(months)} ({order['duration_days']} ngày)\n"
-            f"Số tiền: {format_money(order['price'])}\n\n"
+            f"Giá gốc theo kỳ hạn: {format_money(int(order.get('base_price', order['price'])))}\n"
+            f"{coupon_line}"
+            f"Số tiền cần thanh toán: {format_money(order['price'])}\n\n"
             "1. Quét QR để thanh toán\n"
             "2. Chuyển đúng nội dung\n"
             "3. Bấm 'Tôi đã chuyển khoản'\n"
             "4. Chờ admin xác nhận"
         )
         tg_send_photo(chat_id, qr_url, caption=caption, reply_markup=payment_confirm_keyboard(order["order_code"]))
-        USER_STATE[user_id] = {"latest_order_code": order["order_code"]}
+        USER_STATE[user_id] = {
+            **USER_STATE.get(user_id, {}),
+            "latest_order_code": order["order_code"],
+            "checkout_product_code": code,
+            "checkout_months": months,
+            "checkout_coupon_code": order.get("coupon_code", ""),
+        }
         return
     if data.startswith("paid|"):
         order_code = data.split("|", 1)[1]
@@ -1638,12 +1833,15 @@ def handle_callback(cq: Dict[str, Any]):
         order["status"] = "user_confirmed"
         pending[order_code] = order
         save_pending_orders(pending)
+        coupon_admin_line = ""
+        if order.get("coupon_code"):
+            coupon_admin_line = f"\n- Coupon: {order['coupon_code']} | Giảm {format_money(int(order.get('coupon_discount', 0)))}"
         send_admin_message(
             "💸 Khách báo đã chuyển khoản\n"
             f"- User: @{order.get('username', '')} | ID: {order['user_id']}\n"
             f"- Gói: {CATALOG[order['product_code']]['name']}\n"
             f"- Thời hạn: {term_label(int(order.get('months', 1)))}\n"
-            f"- Mã đơn: {order_code}\n"
+            f"- Mã đơn: {order_code}{coupon_admin_line}\n"
             f"- Số tiền: {format_money(order['price'])}",
             reply_markup=admin_order_keyboard(order_code),
         )
@@ -1771,7 +1969,8 @@ def handle_text_message(message: Dict[str, Any]):
     if text.startswith((
         "/admin", "/addstock", "/addsecret", "/delsecret", "/grant",
         "/setprice", "/inventory", "/orders", "/products",
-        "/checkstock", "/remindnow", "/free_requests", "/broadcast", "/coupons"
+        "/checkstock", "/remindnow", "/free_requests", "/broadcast",
+        "/addcoupon", "/couponon", "/couponoff", "/coupons"
     )):
         handle_admin_command(chat_id, user_id, text)
         return
@@ -1785,6 +1984,37 @@ def handle_text_message(message: Dict[str, Any]):
         return
 
     state = USER_STATE.get(user_id, {})
+
+    if state.get("awaiting_coupon_code"):
+        coupon_code = normalize_coupon_code(text)
+        product_code = state.get("checkout_product_code", "")
+        months = int(state.get("checkout_months", 1) or 1)
+        if not product_code or product_code not in CATALOG:
+            USER_STATE.pop(user_id, None)
+            tg_send_message(chat_id, "❌ Phiên áp mã đã hết. Vui lòng chọn lại gói.")
+            return
+        subtotal = get_product_base_price(product_code, months)
+        result = validate_coupon_for_user(coupon_code, user_id, product_code, subtotal)
+        if not result.get("ok"):
+            tg_send_message(chat_id, result.get("message", "❌ Mã giảm giá không hợp lệ."))
+            return
+        USER_STATE[user_id] = {
+            **state,
+            "awaiting_coupon_code": False,
+            "checkout_coupon_code": result["coupon_code"],
+            "checkout_product_code": product_code,
+            "checkout_months": months,
+        }
+        tg_send_message(
+            chat_id,
+            "✅ Áp mã thành công.\n"
+            f"Mã: {result['coupon_code']}\n"
+            f"Giảm: {format_money(result['discount_amount'])}\n"
+            f"Còn thanh toán: {format_money(result['final_price'])}",
+            reply_markup=confirm_buy_keyboard(product_code, months, has_coupon=True),
+        )
+        return
+
     if state.get("awaiting_canva_email") and state.get("gift_code") == "canva_edu_free":
         email = text.strip()
         if "@" not in email or "." not in email.split("@")[-1]:
