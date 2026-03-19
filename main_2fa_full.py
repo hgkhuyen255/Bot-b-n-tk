@@ -20,6 +20,7 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{CLOUD_RUN_URL}{WEBHOOK_PATH}" if CLOUD_RUN_URL else WEBHOOK_PATH
 TG_BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")
+BOT_USERNAME_CACHE = BOT_USERNAME.strip() if BOT_USERNAME else ""
 
 _admin_env = os.getenv("ADMIN_CHAT_ID", "")
 try:
@@ -358,12 +359,28 @@ def apply_referral_if_needed(user_id: int, username: str, full_name: str, ref_co
     return True
 
 
+def get_bot_username() -> str:
+    global BOT_USERNAME_CACHE
+    if BOT_USERNAME_CACHE:
+        return BOT_USERNAME_CACHE
+    try:
+        r = requests.get(f"{TG_BASE_URL}/getMe", timeout=20)
+        data = r.json()
+        if data.get("ok") and data.get("result", {}).get("username"):
+            BOT_USERNAME_CACHE = data["result"]["username"]
+            return BOT_USERNAME_CACHE
+    except Exception as e:
+        print(f"get_bot_username error: {e}")
+    return ""
+
+
 def build_referral_link(user_id: int) -> str:
     user = get_user_record(user_id)
     code = user.get("referral_code", f"ref{user_id}")
-    if BOT_USERNAME:
-        return f"https://t.me/{BOT_USERNAME}?start={code}"
-    return code
+    bot_username = get_bot_username()
+    if bot_username:
+        return f"https://t.me/{bot_username}?start={code}"
+    return f"Mã mời: {code}"
 
 
 def get_free_requests() -> Dict[str, Any]:
@@ -448,12 +465,15 @@ def submit_free_request_to_admin(req: Dict[str, Any]):
 
 def account_summary_text(user_id: int) -> str:
     user = get_user_record(user_id)
+    invite_link = build_referral_link(user_id)
     return (
         "👤 Tài khoản của tôi\n\n"
         f"Điểm hiện có: {int(user.get('points', 0))}\n"
         f"Tổng người đã mời: {int(user.get('total_invited', 0))}\n"
-        f"Điểm đã dùng đổi quà: {int(user.get('used_points', 0))}\n"
-        f"Link / mã mời: {build_referral_link(user_id)}"
+        f"Điểm đã dùng đổi quà: {int(user.get('used_points', 0))}\n\n"
+        "🔗 Link mời hoàn chỉnh:\n"
+        f"{invite_link}\n\n"
+        "Nhấn giữ link trên để copy gửi cho bạn bè."
     )
 
 
