@@ -1,7 +1,11 @@
 import json
 import os
 import time
+import io
+import hmac
+import hashlib
 import requests
+import qrcode
 import pyotp
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Request
@@ -20,7 +24,6 @@ WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL = f"{CLOUD_RUN_URL}{WEBHOOK_PATH}" if CLOUD_RUN_URL else WEBHOOK_PATH
 TG_BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_USERNAME = os.getenv("BOT_USERNAME", "")
-BOT_USERNAME_CACHE = BOT_USERNAME.strip() if BOT_USERNAME else ""
 
 _admin_env = os.getenv("ADMIN_CHAT_ID", "")
 try:
@@ -359,28 +362,12 @@ def apply_referral_if_needed(user_id: int, username: str, full_name: str, ref_co
     return True
 
 
-def get_bot_username() -> str:
-    global BOT_USERNAME_CACHE
-    if BOT_USERNAME_CACHE:
-        return BOT_USERNAME_CACHE
-    try:
-        r = requests.get(f"{TG_BASE_URL}/getMe", timeout=20)
-        data = r.json()
-        if data.get("ok") and data.get("result", {}).get("username"):
-            BOT_USERNAME_CACHE = data["result"]["username"]
-            return BOT_USERNAME_CACHE
-    except Exception as e:
-        print(f"get_bot_username error: {e}")
-    return ""
-
-
 def build_referral_link(user_id: int) -> str:
     user = get_user_record(user_id)
     code = user.get("referral_code", f"ref{user_id}")
-    bot_username = get_bot_username()
-    if bot_username:
-        return f"https://t.me/{bot_username}?start={code}"
-    return f"Mã mời: {code}"
+    if BOT_USERNAME:
+        return f"https://t.me/{BOT_USERNAME}?start={code}"
+    return code
 
 
 def get_free_requests() -> Dict[str, Any]:
@@ -465,15 +452,12 @@ def submit_free_request_to_admin(req: Dict[str, Any]):
 
 def account_summary_text(user_id: int) -> str:
     user = get_user_record(user_id)
-    invite_link = build_referral_link(user_id)
     return (
         "👤 Tài khoản của tôi\n\n"
         f"Điểm hiện có: {int(user.get('points', 0))}\n"
         f"Tổng người đã mời: {int(user.get('total_invited', 0))}\n"
-        f"Điểm đã dùng đổi quà: {int(user.get('used_points', 0))}\n\n"
-        "🔗 Link mời hoàn chỉnh:\n"
-        f"{invite_link}\n\n"
-        "Nhấn giữ link trên để copy gửi cho bạn bè."
+        f"Điểm đã dùng đổi quà: {int(user.get('used_points', 0))}\n"
+        f"Link / mã mời: {build_referral_link(user_id)}"
     )
 
 
@@ -651,6 +635,20 @@ def tg_send_photo(chat_id: int, photo_url: str, caption: Optional[str] = None, r
     tg_request("sendPhoto", payload)
 
 
+def tg_send_photo_bytes(chat_id: int, photo_bytes: bytes, filename: str = "qr.png",
+                        caption: Optional[str] = None, reply_markup: Optional[Dict[str, Any]] = None):
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    if reply_markup:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    files = {"photo": (filename, photo_bytes, "image/png")}
+    try:
+        requests.post(f"{TG_BASE_URL}/sendPhoto", data=data, files=files, timeout=30)
+    except Exception as e:
+        print(f"Telegram sendPhoto(bytes) error: {e}")
+
+
 def tg_edit_message(chat_id: int, message_id: int, text: str, reply_markup: Optional[Dict[str, Any]] = None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
     if reply_markup:
@@ -773,6 +771,145 @@ def generate_qr(amount: int, payment_code: str) -> str:
         f"https://img.vietqr.io/image/{bank_id}-{account_number}-compact2.png"
         f"?amount={amount}&addInfo={payment_code}"
     )
+
+
+def payos_enabled() -> bool:
+    return bool(PAYOS_CLIENT_ID and PAYOS_API_KEY and PAYOS_CHECKSUM_KEY)
+
+
+def generate_payos_order_code() -> int:
+    base = int(time.time() * 1000)
+    return base
+
+
+def _normalize_payos_value(value: Any) -> str:
+    if value in [None, "undefined", "null"]:
+        return ""
+    if isinstance(value, list):
+        normalized = []
+        for ele in value:
+            if isinstance(ele, dict):
+                normalized.append({k: ele[k] for k in sorted(ele.keys())})
+            else:
+                normalized.append(ele)
+        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, dict):
+        normalized = {k: value[k] for k in sorted(value.keys())}
+        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def create_payos_signature(data: Dict[str, Any], checksum_key: str) -> str:
+    parts = []
+    for key in sorted(data.keys()):
+        parts.append(f"{key}={_normalize_payos_value(data.get(key))}")
+    raw = "&".join(parts)
+    return hmac.new(checksum_key.encode("utf-8"), raw.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_payos_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = payload.get("data") or {}
+    signature = (payload.get("signature") or "").strip().lower()
+    if not data or not signature or not PAYOS_CHECKSUM_KEY:
+        return {"ok": False, "reason": "missing_data_or_signature"}
+    expected = create_payos_signature(data, PAYOS_CHECKSUM_KEY).lower()
+    return {"ok": hmac.compare_digest(expected, signature), "expected": expected, "signature": signature}
+
+
+def payos_headers() -> Dict[str, str]:
+    return {
+        "x-client-id": PAYOS_CLIENT_ID,
+        "x-api-key": PAYOS_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+
+def payos_create_payment_link(order: Dict[str, Any]) -> Dict[str, Any]:
+    if not payos_enabled():
+        raise RuntimeError("payos_not_configured")
+
+    req_data = {
+        "orderCode": int(order["payos_order_code"]),
+        "amount": int(order["price"]),
+        "description": order["payos_description"],
+        "items": [{
+            "name": CATALOG[order["product_code"]]["name"][:25],
+            "quantity": 1,
+            "price": int(order["price"]),
+        }],
+        "cancelUrl": PAYOS_CANCEL_URL,
+        "returnUrl": PAYOS_RETURN_URL,
+    }
+    req_data["signature"] = create_payos_signature({
+        "amount": req_data["amount"],
+        "cancelUrl": req_data["cancelUrl"],
+        "description": req_data["description"],
+        "orderCode": req_data["orderCode"],
+        "returnUrl": req_data["returnUrl"],
+    }, PAYOS_CHECKSUM_KEY)
+
+    r = requests.post(
+        f"{PAYOS_API_BASE}/v2/payment-requests",
+        headers=payos_headers(),
+        json=req_data,
+        timeout=30,
+    )
+    data = r.json()
+    if r.status_code >= 400 or data.get("code") != "00" or not data.get("data"):
+        raise RuntimeError(f"payos_create_failed: {data}")
+    return data["data"]
+
+
+def payos_get_payment_link_info(identifier: Any) -> Dict[str, Any]:
+    if not payos_enabled():
+        raise RuntimeError("payos_not_configured")
+    r = requests.get(
+        f"{PAYOS_API_BASE}/v2/payment-requests/{identifier}",
+        headers=payos_headers(),
+        timeout=30,
+    )
+    data = r.json()
+    if r.status_code >= 400 or data.get("code") != "00" or not data.get("data"):
+        raise RuntimeError(f"payos_get_failed: {data}")
+    return data["data"]
+
+
+def payos_confirm_webhook_url() -> None:
+    if not (payos_enabled() and PAYOS_WEBHOOK_URL):
+        return
+    try:
+        requests.post(
+            f"{PAYOS_API_BASE}/confirm-webhook",
+            headers=payos_headers(),
+            json={"webhookUrl": PAYOS_WEBHOOK_URL},
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"payos_confirm_webhook_url error: {e}")
+
+
+def find_pending_order_by_payos_order_code(payos_order_code: int) -> Optional[Dict[str, Any]]:
+    for order in get_pending_orders().values():
+        if int(order.get("payos_order_code", 0) or 0) == int(payos_order_code):
+            return order
+    return None
+
+
+def find_paid_order_by_payos_order_code(payos_order_code: int) -> Optional[Dict[str, Any]]:
+    for order in get_orders().values():
+        if int(order.get("payos_order_code", 0) or 0) == int(payos_order_code):
+            return order
+    return None
+
+
+def build_qr_png_bytes(data: str) -> bytes:
+    qr = qrcode.QRCode(version=None, box_size=12, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 
@@ -1096,10 +1233,11 @@ def confirm_buy_keyboard(product_code: str, months: int, has_coupon: bool = Fals
     }
 
 
-def payment_confirm_keyboard(payment_code: str):
+def payment_confirm_keyboard(payment_code: str, checkout_url: str):
     return {
         "inline_keyboard": [
-            [{"text": "✅ Tôi đã chuyển khoản", "callback_data": f"paid|{payment_code}"}],
+            [{"text": "💳 Mở trang thanh toán", "url": checkout_url}],
+            [{"text": "🔄 Kiểm tra trạng thái", "callback_data": f"checkpay|{payment_code}"}],
             [{"text": "⬅️ Về menu", "callback_data": "home"}],
         ]
     }
@@ -1309,6 +1447,9 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
                          order_type: str = "new", renew_item_index: Optional[int] = None) -> Dict[str, Any]:
     orders = get_pending_orders()
     order_code = make_payment_code(product_code, user_id)
+    payos_order_code = generate_payos_order_code()
+    while find_pending_order_by_payos_order_code(payos_order_code) or find_paid_order_by_payos_order_code(payos_order_code):
+        payos_order_code += 1
     base_price = get_product_base_price(product_code, months)
     coupon_result = None
     final_price = base_price
@@ -1320,6 +1461,7 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
         else:
             clean_coupon = ""
     duration_days = get_duration_days_for_months(months)
+    short_description = f"DH{str(payos_order_code)[-7:]}"[:9]
     orders[order_code] = {
         "order_code": order_code,
         "user_id": user_id,
@@ -1339,12 +1481,45 @@ def create_pending_order(user_id: int, chat_id: int, username: str, full_name: s
         "created_at": now_ts(),
         "order_type": order_type,
         "renew_item_index": renew_item_index,
+        "payment_provider": "payos",
+        "payos_order_code": payos_order_code,
+        "payos_description": short_description,
+        "payment_link_id": "",
+        "checkout_url": "",
+        "qr_code": "",
     }
     save_pending_orders(orders)
     return orders[order_code]
 
 
+def ensure_payos_checkout(order_code: str) -> Dict[str, Any]:
+    paid_orders = get_orders()
+    if paid_orders.get(order_code, {}).get("status") == "paid":
+        return paid_orders[order_code]
+
+    pending = get_pending_orders()
+    order = pending.get(order_code)
+    if not order:
+        raise ValueError("order_not_found")
+    if order.get("checkout_url") and order.get("payment_link_id"):
+        return order
+
+    payos_data = payos_create_payment_link(order)
+    order["payment_link_id"] = payos_data.get("paymentLinkId", "")
+    order["checkout_url"] = payos_data.get("checkoutUrl", "")
+    order["qr_code"] = payos_data.get("qrCode", "")
+    order["payos_status"] = payos_data.get("status", "PENDING")
+    order["updated_at"] = now_ts()
+    pending[order_code] = order
+    save_pending_orders(pending)
+    return order
+
+
 def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, Any]:
+    paid_orders = get_orders()
+    if paid_orders.get(order_code, {}).get("status") == "paid":
+        return paid_orders[order_code]
+
     pending = get_pending_orders()
     order = pending.get(order_code)
     if not order:
@@ -1387,6 +1562,9 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
             "delivered_by": delivered_by,
             "fulfilled_mode": "renew",
             "renewed_item_index": int(renew_item_index),
+            "payment_link_id": order.get("payment_link_id", ""),
+            "payos_order_code": order.get("payos_order_code"),
+            "payment_ref": order.get("payment_ref", ""),
         }
         save_orders(all_orders)
 
@@ -1438,6 +1616,9 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
         "delivered_by": delivered_by,
         "account_data": account_data,
         "fulfilled_mode": "new",
+        "payment_link_id": order.get("payment_link_id", ""),
+        "payos_order_code": order.get("payos_order_code"),
+        "payment_ref": order.get("payment_ref", ""),
     }
     save_orders(all_orders)
 
@@ -1844,19 +2025,22 @@ def handle_callback(cq: Dict[str, Any]):
             order_type="renew",
             renew_item_index=item_index,
         )
+        try:
+            order = ensure_payos_checkout(order["order_code"])
+        except Exception as e:
+            tg_send_message(chat_id, f"❌ Không tạo được link thanh toán payOS. Kiểm tra cấu hình PAYOS.\n{e}")
+            return
 
-        qr_url = generate_qr(order["price"], order["order_code"])
         caption = (
             f"🧾 Mã đơn gia hạn: {order['order_code']}\n"
             f"Gói: {item.get('product_name', '')}\n"
             f"Cộng thêm: {term_label(months)} ({order['duration_days']} ngày)\n"
             f"Số tiền cần thanh toán: {format_money(order['price'])}\n\n"
-            "1. Quét QR để thanh toán\n"
-            "2. Chuyển đúng nội dung\n"
-            "3. Bấm 'Tôi đã chuyển khoản'\n"
-            "4. Chờ admin xác nhận"
+            "Bot sẽ tự trả đơn ngay khi payOS báo thanh toán thành công.\n"
+            "Bạn có thể bấm nút mở trang thanh toán hoặc quét QR dưới đây."
         )
-        tg_send_photo(chat_id, qr_url, caption=caption, reply_markup=payment_confirm_keyboard(order["order_code"]))
+        qr_bytes = build_qr_png_bytes(order.get("qr_code") or order.get("checkout_url"))
+        tg_send_photo_bytes(chat_id, qr_bytes, caption=caption, reply_markup=payment_confirm_keyboard(order["order_code"], order["checkout_url"]))
         return
     if data.startswith("free_gift|"):
         gift_code = data.split("|", 1)[1]
@@ -1941,7 +2125,11 @@ def handle_callback(cq: Dict[str, Any]):
         if state.get("checkout_product_code") == code and int(state.get("checkout_months", 0) or 0) == months:
             coupon_code = state.get("checkout_coupon_code", "")
         order = create_pending_order(user_id, chat_id, username, full_name, code, months, coupon_code=coupon_code)
-        qr_url = generate_qr(order["price"], order["order_code"])
+        try:
+            order = ensure_payos_checkout(order["order_code"])
+        except Exception as e:
+            tg_send_message(chat_id, f"❌ Không tạo được link thanh toán payOS. Kiểm tra cấu hình PAYOS.\n{e}")
+            return
         coupon_line = ""
         if order.get("coupon_code"):
             coupon_line = (
@@ -1955,12 +2143,11 @@ def handle_callback(cq: Dict[str, Any]):
             f"Giá gốc theo kỳ hạn: {format_money(int(order.get('base_price', order['price'])))}\n"
             f"{coupon_line}"
             f"Số tiền cần thanh toán: {format_money(order['price'])}\n\n"
-            "1. Quét QR để thanh toán\n"
-            "2. Chuyển đúng nội dung\n"
-            "3. Bấm 'Tôi đã chuyển khoản'\n"
-            "4. Chờ admin xác nhận"
+            "Bot sẽ tự động giao hàng ngay khi payOS báo thanh toán thành công.\n"
+            "Bạn không cần đợi admin xác nhận thủ công."
         )
-        tg_send_photo(chat_id, qr_url, caption=caption, reply_markup=payment_confirm_keyboard(order["order_code"]))
+        qr_bytes = build_qr_png_bytes(order.get("qr_code") or order.get("checkout_url"))
+        tg_send_photo_bytes(chat_id, qr_bytes, caption=caption, reply_markup=payment_confirm_keyboard(order["order_code"], order["checkout_url"]))
         USER_STATE[user_id] = {
             **USER_STATE.get(user_id, {}),
             "latest_order_code": order["order_code"],
@@ -1969,29 +2156,45 @@ def handle_callback(cq: Dict[str, Any]):
             "checkout_coupon_code": order.get("coupon_code", ""),
         }
         return
-    if data.startswith("paid|"):
+    if data.startswith("paid|") or data.startswith("checkpay|"):
         order_code = data.split("|", 1)[1]
+        paid_order = get_orders().get(order_code)
+        if paid_order and paid_order.get("status") == "paid":
+            tg_send_message(chat_id, "✅ Đơn này đã được thanh toán và giao hàng rồi.")
+            return
         pending = get_pending_orders()
         order = pending.get(order_code)
         if not order:
             tg_send_message(chat_id, "❌ Không tìm thấy đơn chờ thanh toán.")
             return
-        order["status"] = "user_confirmed"
+        try:
+            info = payos_get_payment_link_info(order.get("payos_order_code"))
+        except Exception as e:
+            tg_send_message(chat_id, f"⚠️ Chưa kiểm tra được trạng thái payOS.\n{e}")
+            return
+
+        status = str(info.get("status", "")).upper()
+        order["payos_status"] = status
+        order["payment_link_id"] = info.get("paymentLinkId", order.get("payment_link_id", ""))
+        order["checkout_url"] = info.get("checkoutUrl", order.get("checkout_url", ""))
+        order["qr_code"] = info.get("qrCode", order.get("qr_code", ""))
         pending[order_code] = order
         save_pending_orders(pending)
-        coupon_admin_line = ""
-        if order.get("coupon_code"):
-            coupon_admin_line = f"\n- Coupon: {order['coupon_code']} | Giảm {format_money(int(order.get('coupon_discount', 0)))}"
-        send_admin_message(
-            "💸 Khách báo đã chuyển khoản\n"
-            f"- User: @{order.get('username', '')} | ID: {order['user_id']}\n"
-            f"- Gói: {CATALOG[order['product_code']]['name']}\n"
-            f"- Thời hạn: {term_label(int(order.get('months', 1)))}\n"
-            f"- Mã đơn: {order_code}{coupon_admin_line}\n"
-            f"- Số tiền: {format_money(order['price'])}",
-            reply_markup=admin_order_keyboard(order_code),
-        )
-        tg_send_message(chat_id, "✅ Đã ghi nhận. Admin sẽ kiểm tra và xác nhận đơn cho bạn.")
+
+        if status == "PAID":
+            order["payment_ref"] = info.get("reference", "manual_check")
+            pending[order_code] = order
+            save_pending_orders(pending)
+            finalize_order(order_code, delivered_by="payos_status_check")
+            tg_send_message(chat_id, "✅ PayOS báo đơn đã thanh toán thành công. Bot đã tự giao hàng.")
+            return
+        if status in {"PENDING", "PROCESSING"}:
+            tg_send_message(chat_id, "⏳ Hệ thống vẫn đang chờ thanh toán. Sau khi trả tiền thành công bot sẽ tự giao hàng.")
+            return
+        if status in {"CANCELLED", "CANCELED"}:
+            tg_send_message(chat_id, "❌ Link thanh toán này đã bị huỷ. Vui lòng tạo đơn mới nếu cần mua lại.")
+            return
+        tg_send_message(chat_id, f"ℹ️ Trạng thái hiện tại: {status or 'không rõ'}")
         return
     if data.startswith("get2fa|"):
         try:
@@ -2194,6 +2397,7 @@ def handle_text_message(message: Dict[str, Any]):
 @app.on_event("startup")
 def on_startup():
     ensure_bootstrap_files()
+    payos_confirm_webhook_url()
 
 
 @app.get("/")
@@ -2204,6 +2408,8 @@ def home():
         "webhook_url": WEBHOOK_URL,
         "catalog_size": len(CATALOG),
         "reminder_endpoint": "/cron/remind_expiring",
+        "payment_webhook": "/payment_webhook",
+        "payos_enabled": payos_enabled(),
     }
 
 
@@ -2238,25 +2444,37 @@ async def payment_webhook(request: Request):
     except Exception:
         return JSONResponse({"ok": False, "error": "invalid_json"}, status_code=400)
 
-    order_code = payload.get("code")
-    amount = payload.get("amount")
-    if not order_code:
-        return JSONResponse({"ok": False, "error": "missing_code"}, status_code=400)
+    verify_result = verify_payos_webhook(payload)
+    if not verify_result.get("ok"):
+        return JSONResponse({"ok": False, "error": "invalid_signature"}, status_code=400)
+
+    data = payload.get("data") or {}
+    payos_order_code = int(data.get("orderCode", 0) or 0)
+    amount = int(data.get("amount", 0) or 0)
+    status_code = str(data.get("code", ""))
+    reference = data.get("reference", "")
+    payment_link_id = data.get("paymentLinkId", "")
+
+    if not payos_order_code:
+        return JSONResponse({"ok": False, "error": "missing_order_code"}, status_code=400)
+
+    existing_paid = find_paid_order_by_payos_order_code(payos_order_code)
+    if existing_paid:
+        return {"ok": True, "status": "already_paid", "order_code": existing_paid.get("order_code")}
+
+    order = find_pending_order_by_payos_order_code(payos_order_code)
+    if not order:
+        return {"ok": True, "status": "ignored_unknown_order", "payos_order_code": payos_order_code}
 
     pending = get_pending_orders()
-    order = pending.get(order_code)
-    if not order:
-        return JSONResponse({"ok": False, "error": "order_not_found"}, status_code=404)
+    order_code = order["order_code"]
+    order["payment_ref"] = reference
+    order["payment_link_id"] = payment_link_id or order.get("payment_link_id", "")
+    order["payos_status"] = "PAID" if status_code == "00" else status_code
+    pending[order_code] = order
+    save_pending_orders(pending)
 
     expected = int(order["price"])
-    if amount is None:
-        return JSONResponse({"ok": False, "error": "missing_amount", "expected": expected}, status_code=400)
-
-    try:
-        amount = int(amount)
-    except Exception:
-        return JSONResponse({"ok": False, "error": "invalid_amount"}, status_code=400)
-
     if amount < expected:
         order["status"] = "underpaid"
         pending[order_code] = order
@@ -2265,8 +2483,32 @@ async def payment_webhook(request: Request):
         send_admin_message(f"⚠️ Đơn {order_code} chuyển thiếu. Đã nhận {amount:,}đ / cần {expected:,}đ".replace(",", "."))
         return {"ok": True, "status": "underpaid"}
 
-    finalize_order(order_code, delivered_by="payment_webhook")
+    if status_code != "00":
+        return {"ok": True, "status": "ignored_non_success", "code": status_code}
+
+    finalize_order(order_code, delivered_by="payos_webhook")
     if amount > expected:
         tg_send_message(order["chat_id"], f"ℹ️ Hệ thống ghi nhận bạn chuyển thừa {amount - expected:,}đ.".replace(",", "."))
-    send_admin_message(f"✅ Đơn {order_code} đã auto xác nhận qua payment webhook.")
-    return {"ok": True, "status": "paid"}
+    send_admin_message(f"✅ Đơn {order_code} đã auto xác nhận qua payOS webhook.")
+    return {"ok": True, "status": "paid", "order_code": order_code}
+
+
+@app.get("/payos-return")
+async def payos_return(orderCode: Optional[int] = None, status: Optional[str] = None, code: Optional[str] = None, id: Optional[str] = None):
+    return JSONResponse({
+        "ok": True,
+        "message": "Thanh toán đã quay về hệ thống. Bạn hãy quay lại Telegram bot để nhận hàng tự động.",
+        "orderCode": orderCode,
+        "status": status,
+        "code": code,
+        "paymentLinkId": id,
+    })
+
+
+@app.get("/payos-cancel")
+async def payos_cancel(orderCode: Optional[int] = None):
+    return JSONResponse({
+        "ok": True,
+        "message": "Bạn đã huỷ thanh toán hoặc chưa hoàn tất. Có thể quay lại bot để tạo lại đơn.",
+        "orderCode": orderCode,
+    })
