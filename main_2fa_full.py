@@ -2213,17 +2213,12 @@ def handle_callback(cq: Dict[str, Any]):
             )
         payment_link_line = f"🔗 Link thanh toán: {order.get('checkout_url')}\n\n" if order.get("checkout_url") else ""
         caption = (
-            f"🧾 Mã đơn: {order['order_code']}\n"
-            f"🔢 payOS orderCode: {order.get('payos_order_code')}\n"
             f"Gói: {CATALOG[code]['name']}\n"
             f"Thời hạn: {term_label(months)} ({order['duration_days']} ngày)\n"
             f"Giá gốc theo kỳ hạn: {format_money(int(order.get('base_price', order['price'])))}\n"
-            f"{coupon_line}"
             f"Số tiền cần thanh toán: {format_money(order['price'])}\n"
-            f"Cổng thanh toán: {'payOS' if order.get('payment_provider') == 'payos' else 'QR dự phòng'}\n\n"
-            f"{payment_link_line}"
-            "1. Quét QR hoặc mở link thanh toán riêng cho đơn này\n"
-            "2. Khi payOS báo thành công, bot sẽ tự giao tài khoản/gia hạn\n"
+            "1. Quét QR thanh toán riêng cho đơn này\n"
+            "2. Khi chuyển khoản thành công, bot sẽ tự giao tài khoản/gia hạn\n"
             "3. Nếu webhook chậm, bấm 'Kiểm tra trạng thái' để đồng bộ thủ công\n"
             "4. Nút 'Tôi đã chuyển khoản' vẫn sẽ báo admin để hỗ trợ khi cần"
         )
