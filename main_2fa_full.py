@@ -1669,7 +1669,7 @@ def finalize_order(order_code: str, delivered_by: str = "system") -> Dict[str, A
             if account_data.get("note"):
                 message += f"Ghi chú: {account_data['note']}\n"
             if account_data.get("username"):
-                message += "\nBạn có thể vào mục 🔐 Lấy mã 2FA khi cần."
+                message += "\nBạn có thể vào mục 🔐 Lấy mã 2FA hoặc dùng lệnh /2fa khi cần."
         else:
             message = (
                 "✅ Thanh toán đã được xác nhận.\n"
