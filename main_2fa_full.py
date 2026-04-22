@@ -1144,6 +1144,20 @@ def build_expiry_reminder_keyboard(item_index: int):
     }
 
 
+def build_admin_expiry_reminder_text(user_id: int, customer: Dict[str, Any], item: Dict[str, Any], days_left: int) -> str:
+    username = (customer or {}).get("username", "")
+    full_name = (customer or {}).get("full_name", "")
+    user_tag = f"@{username}" if username else (full_name or "Không rõ tên")
+    base_text = build_expiry_reminder_text(item, days_left)
+
+    return (
+        "📣 Thông báo nhắc hạn gửi admin\n\n"
+        f"User: {user_tag}\n"
+        f"User ID: {user_id}\n"
+        f"{base_text}"
+    )
+
+
 def process_expiry_reminders() -> Dict[str, Any]:
     customers = get_customers()
     reminder_log = get_reminder_log()
@@ -1171,7 +1185,22 @@ def process_expiry_reminders() -> Dict[str, Any]:
                 continue
 
             try:
-                tg_send_message(int(user_id), build_expiry_reminder_text(item, days_left), reply_markup=build_expiry_reminder_keyboard(idx))
+                user_msg = build_expiry_reminder_text(item, days_left)
+                tg_send_message(
+                    int(user_id),
+                    user_msg,
+                    reply_markup=build_expiry_reminder_keyboard(idx)
+                )
+
+                if ADMIN_CHAT_ID:
+                    admin_msg = build_admin_expiry_reminder_text(
+                        int(user_id),
+                        customer,
+                        item,
+                        days_left
+                    )
+                    tg_send_message(ADMIN_CHAT_ID, admin_msg)
+
                 reminder_log[log_key] = {
                     "user_id": int(user_id),
                     "product_index": idx,
@@ -1179,6 +1208,7 @@ def process_expiry_reminders() -> Dict[str, Any]:
                     "days_left": days_left,
                     "sent_at": now_ts(),
                     "date": today,
+                    "sent_to_admin": bool(ADMIN_CHAT_ID),
                 }
                 sent.append({
                     "user_id": int(user_id),
